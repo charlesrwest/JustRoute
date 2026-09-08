@@ -6,6 +6,7 @@
 #include "routing/astar.hpp"
 
 #include <vector>
+#include <array>
 #include <string>
 #include <cstdint>
 #include <tuple>

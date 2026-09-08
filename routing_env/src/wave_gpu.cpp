@@ -5,6 +5,7 @@
 #include "routing/compat.hpp"
 
 #include <atomic>
+#include <array>
 
 namespace routing {
 
