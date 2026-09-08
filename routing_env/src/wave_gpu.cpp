@@ -2,6 +2,7 @@
 // See wave_gpu.hpp. Kernel: tools/wave_step_map.comp, embedded at build time
 // as wave_spv.h (ROUTING_HAVE_WAVE_GPU is defined only when that succeeded).
 #include "routing/wave_gpu.hpp"
+#include "routing/compat.hpp"
 
 #include <atomic>
 
@@ -494,7 +495,7 @@ bool wave_gpu_map(int W, int H, int L, const uint32_t* ent,
             const size_t y = rem / (size_t)S, wx = rem % (size_t)S;
             const size_t cbase = ((l * H) + y) * (size_t)W + (wx << 5);
             while (bits) {
-                const int b = __builtin_ctz(bits);
+                const int b = rt_ctz(bits);
                 bits &= bits - 1;
                 map_out[cbase + b] = 1;
             }

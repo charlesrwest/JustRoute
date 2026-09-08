@@ -1,4 +1,5 @@
 #include "routing/astar.hpp"
+#include "routing/compat.hpp"
 #include "routing/board.hpp"
 #include "routing/wave_gpu.hpp"
 
@@ -858,7 +859,7 @@ bool Board::wave_flood_impl(int position, const std::vector<Cell>& seeds,
                         const size_t cbase =
                             ((size_t)l * H + y) * (size_t)W + ((size_t)wx << 6);
                         while (bits) {
-                            const int b = __builtin_ctzll(bits);
+                            const int b = rt_ctzll(bits);
                             bits &= bits - 1;
                             map[cbase + b] = wave_no;
                         }
@@ -895,7 +896,7 @@ size_t Board::wave_reach_count(int position, const std::vector<Cell>& seeds) con
                        * (size_t)((grid_.width() + 63) >> 6);
     size_t n = 0;
     for (size_t i = 0; i < words; ++i)
-        n += (size_t)__builtin_popcountll(tls_wave.vis[i]);
+        n += (size_t)rt_popcountll(tls_wave.vis[i]);
     return n;
 }
 
@@ -1800,7 +1801,7 @@ void Board::route_nets_from_parallel(int lo, RouteStats& stats,
 #ifdef ROUTING_HAVE_OPENMP
 #pragma omp parallel for schedule(dynamic) num_threads(B)
 #endif
-        for (size_t bi = 0; bi < batch.size(); ++bi) {
+        for (int bi = 0; bi < (int)batch.size(); ++bi) {
             const int kk = batch[bi];
             Net local = nets_[(size_t)kk];
             local.segments.clear();

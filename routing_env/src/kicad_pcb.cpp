@@ -1,4 +1,5 @@
 #include "routing/kicad_pcb.hpp"
+#include "routing/compat.hpp"
 #include "routing/newstroke_ascii.hpp"
 #include "routing/pcb_rdl.hpp"  // recommended_resolution (Stage-10 fidelity)
 

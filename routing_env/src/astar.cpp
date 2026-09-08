@@ -1,4 +1,5 @@
 #include "routing/astar.hpp"
+#include "routing/compat.hpp"
 #include "routing/cost_model.hpp"
 
 #include <queue>
@@ -112,7 +113,7 @@ struct RadixHeap {
     }
     static int idx_of(int64_t key, int64_t last) {
         const uint64_t x = (uint64_t)key ^ (uint64_t)last;
-        return x ? 64 - __builtin_clzll(x) : 0;
+        return x ? 64 - rt_clzll(x) : 0;
     }
     void push(int64_t key, int32_t v) {
         bucket[idx_of(key, last)].emplace_back(key, v);
