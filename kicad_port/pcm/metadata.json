@@ -8,12 +8,12 @@
     "author": {
         "name": "Charles Ryan West",
         "contact": {
-            "web": "https://github.com/REPLACE_ME/justroute"
+            "web": "https://github.com/charlesrwest/JustRoute"
         }
     },
     "license": "BSD-3-Clause",
     "resources": {
-        "homepage": "https://github.com/REPLACE_ME/justroute"
+        "homepage": "https://github.com/charlesrwest/JustRoute"
     },
     "versions": [
         {
