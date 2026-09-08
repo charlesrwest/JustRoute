@@ -18,7 +18,7 @@
     "versions": [
         {
             "version": "0.1.0",
-            "status": "development",
+            "status": "testing",
             "kicad_version": "9.0",
             "platforms": ["linux", "macos", "windows"]
         }

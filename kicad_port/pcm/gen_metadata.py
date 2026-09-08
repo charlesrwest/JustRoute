@@ -58,9 +58,9 @@ def main() -> int:
     v["download_sha256"] = sha256(zp)
     v["download_size"] = zp.stat().st_size
     v["install_size"] = install_size(zp)
-    # a tagged release is not "development"
-    if v.get("status") == "development":
-        v["status"] = "stable"
+    # NOTE: status is intentionally NOT auto-promoted. It reflects the
+    # checked-in metadata (testing/stable/...), a deliberate maturity call —
+    # a tagged build does not by itself make a package "stable".
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
