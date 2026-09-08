@@ -40,8 +40,12 @@ def _tuned_protocol(env) -> None:
         from rl.topo import topo_order, apply_net_order
         env.board().set_via_cost(2.71)
         apply_net_order(env, topo_order(env.board()))
-        env.board().bake_congestion_rudy()
-        env.board().set_congestion_weight(0.35)
+        # RUDY static congestion steering measured to HURT completion on the
+        # corpus (fast single pass +5.4 pts, full engine +2.7 pts, and fewer
+        # unconnected pins) — it double-counts with the negotiation finisher's
+        # own dynamic (history-cost) congestion, forcing detours that fail.
+        # Disabled (weight 0); the setter stays for easy experimentation.
+        env.board().set_congestion_weight(0.0)
     except ImportError:
         pass
 
