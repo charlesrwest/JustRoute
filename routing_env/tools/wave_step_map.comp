@@ -1,0 +1,75 @@
+#version 450
+// Fused wave step WITH per-cell wave-index recording (for wave-guided A*):
+// fresh = spread(fin) & ent & ~vis; vis |= fresh; fout = fresh;
+// map[cell] = wave for each fresh bit. pc.wave is updated per dispatch.
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Ent { uint ent[]; };
+layout(std430, binding = 1) readonly buffer Via { uint via_p[]; };
+layout(std430, binding = 2) readonly buffer Fin { uint fin[]; };
+layout(std430, binding = 3) writeonly buffer Fout { uint fout[]; };
+layout(std430, binding = 4) buffer Vis { uint vis[]; };
+layout(std430, binding = 5) buffer Flag { uint changed; };
+layout(std430, binding = 6) writeonly buffer Map { uint wave_map[]; };
+
+layout(push_constant) uniform PC { int W; int H; int L; int S; int wave; } pc;
+
+uint ldf(int l, int y, int wx) {
+    if (y < 0 || y >= pc.H || wx < 0 || wx >= pc.S) return 0u;
+    return fin[uint((l * pc.H + y) * pc.S + wx)];
+}
+uint lde(int l, int y, int wx) {
+    if (y < 0 || y >= pc.H || wx < 0 || wx >= pc.S) return 0u;
+    return ent[uint((l * pc.H + y) * pc.S + wx)];
+}
+uint E(int l, int y, int wx, bool isEnt) {
+    uint v = isEnt ? lde(l, y, wx) : ldf(l, y, wx);
+    uint p = (wx > 0) ? (isEnt ? lde(l, y, wx - 1) : ldf(l, y, wx - 1)) : 0u;
+    return (v << 1) | (p >> 31);
+}
+uint Wst(int l, int y, int wx, bool isEnt) {
+    uint v = isEnt ? lde(l, y, wx) : ldf(l, y, wx);
+    uint n = (wx < pc.S - 1) ? (isEnt ? lde(l, y, wx + 1) : ldf(l, y, wx + 1)) : 0u;
+    return (v >> 1) | (n << 31);
+}
+
+void main() {
+    uint w = gl_GlobalInvocationID.x;
+    uint layer_words = uint(pc.H * pc.S);
+    if (w >= uint(pc.L) * layer_words) return;
+    int l = int(w / layer_words);
+    int rem = int(w % layer_words);
+    int y = rem / pc.S;
+    int wx = rem % pc.S;
+
+    uint nw = E(l, y, wx, false) | Wst(l, y, wx, false)
+            | ldf(l, y - 1, wx) | ldf(l, y + 1, wx);
+    uint entN = lde(l, y - 1, wx);
+    uint entS = lde(l, y + 1, wx);
+    nw |= E(l, y - 1, wx, false) & E(l, y, wx, true) & entN;
+    nw |= Wst(l, y - 1, wx, false) & Wst(l, y, wx, true) & entN;
+    nw |= E(l, y + 1, wx, false) & E(l, y, wx, true) & entS;
+    nw |= Wst(l, y + 1, wx, false) & Wst(l, y, wx, true) & entS;
+    uint vp = via_p[uint(y * pc.S + wx)];
+    if (l > 0) nw |= ldf(l - 1, y, wx) & vp;
+    if (l < pc.L - 1) nw |= ldf(l + 1, y, wx) & vp;
+
+    uint lastmask = 0xFFFFFFFFu;
+    if (wx == pc.S - 1 && (pc.W & 31) != 0)
+        lastmask = (1u << uint(pc.W & 31)) - 1u;
+
+    uint v = vis[w];
+    uint fresh = nw & lde(l, y, wx) & lastmask & ~v;
+    fout[w] = fresh;
+    if (fresh != 0u) {
+        vis[w] = v | fresh;
+        atomicOr(changed, 1u);
+        uint cbase = (uint(l * pc.H + y) * uint(pc.W)) + uint(wx << 5);
+        uint bits = fresh;
+        while (bits != 0u) {
+            int b = findLSB(bits);
+            bits &= bits - 1u;
+            wave_map[cbase + uint(b)] = uint(pc.wave);
+        }
+    }
+}

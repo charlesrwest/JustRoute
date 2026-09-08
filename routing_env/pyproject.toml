@@ -1,0 +1,21 @@
+# pip-buildable packaging of the routing core (the substrate for per-platform
+# wheels: `pip wheel .` locally, cibuildwheel in CI for the mac/win matrix).
+# The CMake build is reused as-is; only the python module target is built.
+[build-system]
+requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "routing-env"
+version = "0.1.0"
+description = "Grid PCB autorouting core (JustRoute): A*, negotiated congestion, KiCad I/O"
+requires-python = ">=3.10"
+license = {text = "BSD-3-Clause"}
+
+[tool.scikit-build]
+cmake.args = [
+    "-DROUTING_ENV_BUILD_PYTHON=ON",
+    "-DCMAKE_BUILD_TYPE=Release",
+]
+wheel.packages = []
+build.targets = ["routing_env"]

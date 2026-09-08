@@ -1,0 +1,19 @@
+# CI wheel matrix for the routing core (macOS / Windows / manylinux).
+# Usage in CI:  pipx run cibuildwheel --config-file kicad_port/pcm/cibuildwheel.toml routing_env/
+# Then feed each wheel's .so/.pyd into build_pcm_package.sh's staging on the
+# matching runner (or extend that script to accept a prebuilt wheel path).
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
+skip = "*-musllinux* *_i686 *-win32"
+build-verbosity = 1
+# the Vulkan/GPU path is optional at build time; CPU-only wheels are the target
+environment = { ROUTING_ENV_BUILD_PYTHON = "ON" }
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64", "aarch64"]
+
+[tool.cibuildwheel.macos]
+archs = ["arm64", "x86_64"]
+
+[tool.cibuildwheel.windows]
+archs = ["AMD64"]

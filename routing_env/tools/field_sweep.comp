@@ -1,0 +1,359 @@
+// Exact weighted cost-field on the routing grid (GAMER-style directional
+// sweeps, adapted to 8-connectivity + corner-cut + via layers).
+//
+// Units: cost[] is q20 (2^-20 cost units — the exact lattice of enter costs
+// with quantized congestion weight and gamma==1); dist[] is 2^-27 units:
+//   straight step into cell c : cost[c] * 128
+//   diagonal step into cell c : cost[c] * 181          (1448/1024 = 181/128)
+//   via step into cell c      : (via_q + cost[c]) * 128
+// 0xFFFFFFFF = blocked; dist ~0UL = unreached. Iterating the 8 sweeps + via
+// pass to fixpoint yields the EXACT integer Dijkstra field (order-independent).
+//
+// mode 0: directional sweep, dir 0..7 (thread = one line)
+//   0:+x  1:-x  2:+y  3:-y  4:(+1,+1)  5:(-1,-1)  6:(+1,-1)  7:(-1,+1)
+// mode 1: via relaxation (thread = one cell; adjacent layers, dest-side rule)
+// mode 2: predecessor pass (thread = one cell): pred = FIRST neighbor n with
+//         dist[n] + step(n->cur) == dist[cur] (fixed order: 8 planar then
+//         vias — the SAME rule as walk_field_descent, so CPU/GPU agree).
+//         Seeds (dist==0) point at themselves. Writes predO and predJ.
+// mode 3: label pointer-jumping iteration (thread = one cell): adopt
+//         label[predJ[i]]; halve predJ. Log-depth to convergence. predO is
+//         untouched — walks need the full chains.
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC {
+    int W; int H; int L; int mode; int dir; uint via_q;
+} pc;
+layout(std430, binding = 0) buffer CostB { uint cost[]; };
+#define costw cost
+layout(std430, binding = 1) readonly buffer ViaB  { uint via_ok[]; };
+layout(std430, binding = 2) buffer DistB { uint64_t dist[]; };
+layout(std430, binding = 3) buffer FlagB { uint flag; };
+layout(std430, binding = 4) buffer PredOB { uint predO[]; };
+layout(std430, binding = 5) buffer PredJB { uint predJ[]; };
+layout(std430, binding = 6) buffer LabB  { uint labl[]; };
+// Dirty-line flags (exact active-set sweeping): one u32 per line per
+// orientation (0 rows, 1 cols, 2 x-y diagonals, 3 x+y diagonals), two
+// parity halves ping-ponged per iteration via pc.dir bit 8. A changed cell
+// marks its 4 orientation lines in the OUT half; a sweep of orientation o
+// skips lines whose IN-half flag is clear. Layout per half:
+//   rows  [0, L*H)   cols [L*H, L*H+L*W)
+//   d1    [.., +L*(W+H-1))   d2 [.., +L*(W+H-1))
+layout(std430, binding = 7) buffer LineFB { uint linef[]; };
+// mode 5 (boundary reduction, pass in dir bits 0-1) + mode 6 (edge walk):
+//   aux[0 .. NSLOT*6)      : pair table, 6 u32/slot:
+//                            key, w_hi, w_lo, imin, jmin, used
+//   aux[NSLOT*6]           : path append counter
+//   aux[NSLOT*6+1 ..]      : appended path cells (window indices)
+// Slot key = (min(la,lb)<<16) | max(la,lb) + 1 (0 = empty). Open addressing,
+// probe stride 1. Deterministic winner: min (w, i, j).
+layout(std430, binding = 8) buffer AuxB { uint aux[]; };
+
+const uint NSLOT = 131072u;
+const uint OVFL = NSLOT * 6u + 1u;          // overflow flag word
+const uint PATH0 = NSLOT * 6u + 2u;
+
+uint pair_slot(uint key) {
+    uint h = (key * 2654435761u) & (NSLOT - 1u);
+    for (uint t = 0u; t < 64u; ++t) {       // hard probe cap: bounded kernel
+        uint s = (h + t) & (NSLOT - 1u);
+        uint cur = aux[s * 6u];
+        if (cur == key) return s;
+        if (cur == 0u) {
+            uint prev = atomicCompSwap(aux[s * 6u], 0u, key);
+            if (prev == 0u || prev == key) return s;
+        }
+    }
+    aux[OVFL] = 1u;                          // host falls back to CPU (exact)
+    return 0xFFFFFFFFu;
+}
+
+const uint64_t INF = uint64_t(0xFFFFFFFFFFFFFFFFUL);
+const uint BLOCK = 0xFFFFFFFFu;
+const uint UNSET = 0xFFFFFFFFu;
+
+uint cidx(int l, int x, int y) { return uint((l * pc.H + y) * pc.W + x); }
+
+uint lines_per_half() {
+    return uint(pc.L) * uint(pc.H + pc.W + 2 * (pc.W + pc.H - 1));
+}
+uint line_id(int o, int l, int k) {
+    uint base = 0u;
+    if (o >= 1) base += uint(pc.L * pc.H);
+    if (o >= 2) base += uint(pc.L * pc.W);
+    if (o >= 3) base += uint(pc.L * (pc.W + pc.H - 1));
+    int per = (o == 0) ? pc.H : ((o == 1) ? pc.W : (pc.W + pc.H - 1));
+    return base + uint(l * per + k);
+}
+void mark_cell(int l, int x, int y, uint hf) {
+    uint off = hf * lines_per_half();
+    linef[off + line_id(0, l, y)] = 1u;
+    linef[off + line_id(1, l, x)] = 1u;
+    linef[off + line_id(2, l, (x - y) + (pc.H - 1))] = 1u;
+    linef[off + line_id(3, l, x + y)] = 1u;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint parity = uint(pc.dir >> 8) & 1u;     // IN half for modes 0/1
+    int dir = pc.dir & 0xFF;
+
+    if (pc.mode == 4) {                       // mark seed lines into `parity`
+        uint cells = uint(pc.L * pc.H * pc.W);
+        if (gid >= cells) return;
+        if (dist[gid] != uint64_t(0UL)) return;
+        int plane = pc.H * pc.W;
+        int l = int(gid) / plane;
+        int rem = int(gid) - l * plane;
+        mark_cell(l, rem % pc.W, rem / pc.W, parity);
+        return;
+    }
+
+    if (pc.mode == 7) {   // apply corridor: cost outside the mask -> BLOCK
+        uint cells = uint(pc.L * pc.H * pc.W);
+        if (gid >= cells) return;
+        // mask bits live in the aux path region (1 bit per cell)
+        uint wbit = aux[PATH0 + (gid >> 5)];
+        if (((wbit >> (gid & 31u)) & 1u) == 0u) {
+            // note: writes require cost non-readonly; see binding decl
+            costw[gid] = BLOCK;
+        }
+        return;
+    }
+
+    if (pc.mode == 5) {   // boundary reduction; pass index in dir bits 0-1
+        uint cells = uint(pc.L * pc.H * pc.W);
+        if (gid >= cells) return;
+        if (dist[gid] == INF) return;
+        uint la = labl[gid];
+        if (la == UNSET) return;
+        int plane = pc.H * pc.W;
+        int l = int(gid) / plane;
+        int rem = int(gid) - l * plane;
+        int y = rem / pc.W, x = rem - y * pc.W;
+        int pass = dir & 3;
+        const int FDXb[4] = int[4](1, 0, 1, 1);
+        const int FDYb[4] = int[4](0, 1, 1, -1);
+        for (int d = 0; d < 5; ++d) {
+            uint j; bool dg = false; uint64_t st;
+            if (d < 4) {
+                int nx = x + FDXb[d], ny = y + FDYb[d];
+                if (nx < 0 || nx >= pc.W || ny < 0 || ny >= pc.H) continue;
+                j = uint(l * plane + ny * pc.W + nx);
+                dg = d >= 2;
+                if (dg) {
+                    if (cost[cidx(l, nx, y)] == BLOCK ||
+                        cost[cidx(l, x, ny)] == BLOCK) continue;
+                }
+                if (cost[j] == BLOCK || dist[j] == INF) continue;
+                st = uint64_t(cost[j]) * (dg ? 181UL : 128UL);
+            } else {
+                if (l + 1 >= pc.L) continue;
+                j = uint((l + 1) * plane + rem);
+                if (via_ok[gid] == 0u || via_ok[j] == 0u) continue;
+                if (cost[j] == BLOCK || dist[j] == INF) continue;
+                st = (uint64_t(pc.via_q) + uint64_t(cost[j])) * 128UL;
+            }
+            uint lb = labl[j];
+            if (lb == UNSET || lb == la) continue;
+            uint64_t w = dist[gid] + dist[j] + st;
+            uint key = ((min(la, lb) << 16) | max(la, lb)) + 1u;
+            uint s = pair_slot(key);
+            if (s == 0xFFFFFFFFu) continue;
+            uint whi = uint(w >> 32), wlo = uint(w & 0xFFFFFFFFUL);
+            if (pass == 0) {
+                atomicMin(aux[s * 6u + 1u], whi);
+            } else if (pass == 1) {
+                if (aux[s * 6u + 1u] == whi) atomicMin(aux[s * 6u + 2u], wlo);
+            } else if (pass == 2) {
+                if (aux[s * 6u + 1u] == whi && aux[s * 6u + 2u] == wlo)
+                    atomicMin(aux[s * 6u + 3u], gid);
+            } else {
+                if (aux[s * 6u + 1u] == whi && aux[s * 6u + 2u] == wlo &&
+                    aux[s * 6u + 3u] == gid)
+                    atomicMin(aux[s * 6u + 4u], j);
+            }
+        }
+        return;
+    }
+
+    if (pc.mode == 6) {   // walk one MST edge: c = pc.dir cell, n = via_q cell
+        if (gid != 0u) return;              // single thread, exact truncation
+        uint start = aux[NSLOT * 6u];
+        uint ends[2];
+        ends[0] = uint(pc.dir);
+        ends[1] = pc.via_q;
+        for (int e = 0; e < 2; ++e) {
+            uint cur = ends[e];
+            while (true) {
+                uint at = atomicAdd(aux[NSLOT * 6u], 1u);
+                aux[PATH0 + at] = cur | (uint(e) << 31);
+                if (predJ[cur] == 1u || dist[cur] == uint64_t(0UL)) break;
+                uint p = predO[cur];
+                if (p == UNSET || p == cur) break;
+                cur = p;
+            }
+        }
+        // mark THIS edge's cells in the in-tree mask (predJ reused as flags;
+        // cleared by the host before the first edge)
+        uint total = aux[NSLOT * 6u];
+        for (uint t = start; t < total; ++t)
+            predJ[aux[PATH0 + t] & 0x7FFFFFFFu] = 1u;
+        return;
+    }
+
+    if (pc.mode == 2) {                       // predecessor pass
+        uint cells = uint(pc.L * pc.H * pc.W);
+        if (gid >= cells) return;
+        uint64_t dc = dist[gid];
+        if (dc == INF) return;
+        if (dc == uint64_t(0UL)) { predO[gid] = gid; predJ[gid] = gid; return; }
+        int plane = pc.H * pc.W;
+        int l = int(gid) / plane;
+        int rem = int(gid) - l * plane;
+        int y = rem / pc.W, x = rem - y * pc.W;
+        uint64_t cc = uint64_t(cost[gid]);
+        const int DXp[8] = int[8](1, -1, 0, 0, 1, -1, 1, -1);
+        const int DYp[8] = int[8](0, 0, 1, -1, 1, -1, -1, 1);
+        for (int d = 0; d < 8; ++d) {
+            int nx = x + DXp[d], ny = y + DYp[d];
+            if (nx < 0 || nx >= pc.W || ny < 0 || ny >= pc.H) continue;
+            uint j = uint(l * plane + ny * pc.W + nx);
+            if (dist[j] == INF) continue;
+            bool dg = d >= 4;
+            if (dg) {
+                if (cost[cidx(l, nx, y)] == BLOCK ||
+                    cost[cidx(l, x, ny)] == BLOCK) continue;
+            }
+            if (dist[j] + cc * (dg ? 181UL : 128UL) == dc) {
+                predO[gid] = j; predJ[gid] = j; return;
+            }
+        }
+        if (via_ok[gid] != 0u) {
+            for (int dl = -1; dl <= 1; dl += 2) {
+                int nl = l + dl;
+                if (nl < 0 || nl >= pc.L) continue;
+                uint j = uint(nl * plane + rem);
+                if (dist[j] == INF) continue;
+                if (dist[j] + (uint64_t(pc.via_q) + cc) * 128UL == dc) {
+                    predO[gid] = j; predJ[gid] = j; return;
+                }
+            }
+        }
+        predO[gid] = UNSET; predJ[gid] = UNSET;   // inconsistent (never expected)
+        return;
+    }
+
+    if (pc.mode == 3) {                       // label jump iteration
+        uint cells = uint(pc.L * pc.H * pc.W);
+        if (gid >= cells) return;
+        if (dist[gid] == INF) return;
+        uint p = predJ[gid];
+        if (p == gid || p == UNSET) return;
+        bool ch = false;
+        if (labl[gid] == UNSET) {
+            uint lp = labl[p];
+            if (lp != UNSET) { labl[gid] = lp; ch = true; }
+        }
+        uint pp = predJ[p];
+        if (pp != UNSET && pp != p) { predJ[gid] = pp; ch = true; }
+        if (ch) atomicOr(flag, 1u);
+        return;
+    }
+
+    if (pc.mode == 1) {
+        uint cells = uint(pc.L * pc.H * pc.W);
+        if (gid >= cells) return;
+        uint c = cost[gid];
+        if (c == BLOCK || via_ok[gid] == 0u) return;   // dest-side rule
+        int plane = pc.H * pc.W;
+        int l = int(gid) / plane;
+        int rem = int(gid) - l * plane;
+        uint64_t step = uint64_t(pc.via_q + c) * 128UL;
+        uint64_t best = dist[gid];
+        bool ch = false;
+        for (int dl = -1; dl <= 1; dl += 2) {
+            int nl = l + dl;
+            if (nl < 0 || nl >= pc.L) continue;
+            uint64_t dj = dist[uint(nl * plane + rem)];
+            if (dj == INF) continue;
+            uint64_t cand = dj + step;
+            if (cand < best) { best = cand; ch = true; }
+        }
+        if (ch) {
+            dist[gid] = best;
+            mark_cell(l, rem % pc.W, rem / pc.W, 1u - parity);
+            atomicOr(flag, 1u);
+        }
+        return;
+    }
+
+    // mode 0: one thread walks one line in sweep direction `dir`.
+    int dx = 0, dy = 0;
+    if (dir == 0) { dx = 1; }
+    else if (dir == 1) { dx = -1; }
+    else if (dir == 2) { dy = 1; }
+    else if (dir == 3) { dy = -1; }
+    else if (dir == 4) { dx = 1; dy = 1; }
+    else if (dir == 5) { dx = -1; dy = -1; }
+    else if (dir == 6) { dx = 1; dy = -1; }
+    else { dx = -1; dy = 1; }
+    bool diag = (dx != 0 && dy != 0);
+
+    int lines_per_layer = diag ? (pc.W + pc.H - 1) : (dx != 0 ? pc.H : pc.W);
+    uint nlines = uint(pc.L * lines_per_layer);
+    if (gid >= nlines) return;
+    int l = int(gid) / lines_per_layer;
+    int k = int(gid) - l * lines_per_layer;
+    {   // dirty-line gate: skip lines with no changed cell last iteration
+        int o = diag ? ((dx == dy) ? 2 : 3) : ((dx != 0) ? 0 : 1);
+        if (linef[parity * lines_per_half() + line_id(o, l, k)] == 0u)
+            return;
+    }
+
+    int x, y;
+    if (!diag) {
+        if (dx != 0) { y = k; x = (dx > 0) ? 0 : pc.W - 1; }
+        else         { x = k; y = (dy > 0) ? 0 : pc.H - 1; }
+    } else if (dx == dy) {
+        // lines of constant (x - y) = c, c in [-(H-1) .. W-1]
+        int c = k - (pc.H - 1);
+        if (dx > 0) { x = max(0, c); y = x - c; }
+        else        { x = min(pc.W - 1, c + pc.H - 1); y = x - c; }
+    } else {
+        // lines of constant (x + y) = s, s in [0 .. W+H-2]
+        int s = k;
+        if (dx > 0) { x = max(0, s - (pc.H - 1)); y = s - x; }
+        else        { x = min(pc.W - 1, s); y = s - x; }
+    }
+
+    bool ch = false;
+    uint64_t dprev = INF;
+    int px = x - dx, py = y - dy;      // predecessor of the first cell: none
+    while (x >= 0 && x < pc.W && y >= 0 && y < pc.H) {
+        uint i = cidx(l, x, y);
+        uint c = cost[i];
+        if (c != BLOCK && dprev != INF) {
+            bool ok = true;
+            if (diag) {                 // corner-cut: both orthogonal cells open
+                if (cost[cidx(l, px, y)] == BLOCK ||
+                    cost[cidx(l, x, py)] == BLOCK) ok = false;
+            }
+            if (ok) {
+                uint64_t cand = dprev
+                    + uint64_t(c) * (diag ? 181UL : 128UL);
+                if (cand < dist[i]) {
+                    dist[i] = cand;
+                    mark_cell(l, x, y, 1u - parity);
+                    ch = true;
+                }
+            }
+        }
+        dprev = dist[i];
+        px = x; py = y;
+        x += dx; y += dy;
+    }
+    if (ch) atomicOr(flag, 1u);
+}

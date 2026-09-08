@@ -1,0 +1,5 @@
+# KiCad IPC API client. Tested against kipy 0.8 (KiCad 10); the IPC API
+# stabilized at KiCad 9 (kipy 0.4+). Upper bound guards against a breaking
+# 1.0 — raise it once verified. On a version mismatch the plugin fails with
+# a readable message rather than a raw traceback.
+kicad-python>=0.4,<1.0

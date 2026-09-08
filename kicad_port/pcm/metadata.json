@@ -1,0 +1,26 @@
+{
+    "$schema": "https://go.kicad.org/pcm/schemas/v1",
+    "name": "JustRoute autorouter",
+    "description": "Batch autorouter: routes unrouted nets around existing copper, honors netclass rules and rule areas, adds results as one undoable commit.",
+    "description_full": "JustRoute is a grid-based batch autorouter with best-state retention, blame-directed rip-up, and PathFinder-style negotiated congestion. It reads the board natively (all dialects v4 through the v11 nightlies), treats existing tracks/vias/rule-areas/graphics as fixed obstacles, routes only what is unrouted, and emits per-netclass track widths and via sizes. Routed traces are smoothed off the grid staircase (optionally with rounded corner fillets). Runs as an external IPC process (CPU-only, headless engine); results are written back as a single undoable commit and copper pours are refilled. KiCad's own DRC is the release judge - every gate sample of harvested boards certifies with zero new violations.",
+    "identifier": "org.justroute.autorouter",
+    "type": "plugin",
+    "author": {
+        "name": "Charles Ryan West",
+        "contact": {
+            "web": "https://github.com/REPLACE_ME/justroute"
+        }
+    },
+    "license": "BSD-3-Clause",
+    "resources": {
+        "homepage": "https://github.com/REPLACE_ME/justroute"
+    },
+    "versions": [
+        {
+            "version": "0.1.0",
+            "status": "development",
+            "kicad_version": "9.0",
+            "platforms": ["linux", "macos", "windows"]
+        }
+    ]
+}

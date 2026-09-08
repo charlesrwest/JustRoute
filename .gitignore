@@ -1,0 +1,33 @@
+# secrets — never commit
+token.txt
+**/token.txt
+*.pem
+*.key
+
+# build artifacts
+routing_env/build*/
+build*/
+*.so
+*.pyd
+*.o
+*.a
+*.dylib
+CMakeCache.txt
+CMakeFiles/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+wheelhouse/
+
+# packaging output
+kicad_port/pcm/dist/
+dist/
+
+# editor/OS
+.DS_Store
+*.swp
+*~

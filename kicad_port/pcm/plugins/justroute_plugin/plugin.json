@@ -1,0 +1,31 @@
+{
+    "identifier": "org.justroute.autorouter",
+    "name": "JustRoute autorouter",
+    "description": "Batch autorouter: routes the unrouted nets of the open board around existing copper, then adds the result as a single undoable commit. CPU-only, DRC-certified engine.",
+    "runtime": {
+        "type": "python",
+        "min_version": "3.10"
+    },
+    "actions": [
+        {
+            "identifier": "route-board",
+            "name": "Route board",
+            "description": "Route the board's unrouted nets (existing tracks, vias, and rule areas are honored; netclass widths come from the project file). With tracks/pads/nets SELECTED, routes only the selected nets.",
+            "entrypoint": "route_action.py",
+            "show-button": true,
+            "scopes": [
+                "pcb"
+            ]
+        },
+        {
+            "identifier": "route-settings",
+            "name": "Autorouter settings",
+            "description": "Edit JustRoute preferences for this project (budget, effort, pour-fed nets, grid) \u2014 writes justroute.json next to the board.",
+            "entrypoint": "settings_action.py",
+            "show-button": true,
+            "scopes": [
+                "pcb"
+            ]
+        }
+    ]
+}

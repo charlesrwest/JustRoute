@@ -1,0 +1,44 @@
+// GPU enter-cost bake (field router stage 3): compute a net's windowed cost
+// grid from uploaded slices of the board's occupancy state. EXACT integer
+// mirror of Board::make_net_context's enter closure under the fast-path
+// preconditions (avoidance mults == 0, congestion gamma == 1, base == 1):
+//   blocked  : foreign owner | foreign clearance zone |
+//              (foreign pad inflation && not own pad)
+//   cost q20 : base_q20 + wq * max(0, cong_q10 - self_q10)
+// (wq = congestion weight in q10; the product is exactly the q20 lattice.)
+// Via eligibility stays CPU-side (already O(cells) via Chebyshev dilations).
+#version 450
+
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC {
+    int ww; int wh; int L; int tok; uint wq; uint base_q20;
+} pc;
+layout(std430, binding = 0) readonly buffer OwnB { int owner[]; };
+layout(std430, binding = 1) readonly buffer ClzB { int clz[]; };
+layout(std430, binding = 2) readonly buffer PinB { int padinf[]; };
+layout(std430, binding = 3) readonly buffer PadB { int pado[]; };
+layout(std430, binding = 4) readonly buffer CngB { uint cong[]; };   // 2D q10
+layout(std430, binding = 5) readonly buffer SlfB { uint selfq[]; };  // 2D q10
+layout(std430, binding = 6) writeonly buffer OutB { uint cost[]; };
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint cells = uint(pc.L * pc.wh * pc.ww);
+    if (gid >= cells) return;
+    int o = owner[gid];
+    if (o != 0 && o != pc.tok) { cost[gid] = 0xFFFFFFFFu; return; }
+    int cz = clz[gid];
+    if (cz != 0 && cz != pc.tok) { cost[gid] = 0xFFFFFFFFu; return; }
+    int p2 = padinf[gid];
+    if (p2 != 0 && p2 != pc.tok && pado[gid] != pc.tok) {
+        cost[gid] = 0xFFFFFFFFu;
+        return;
+    }
+    uint c = pc.base_q20;
+    if (pc.wq != 0u) {
+        uint ci = gid % uint(pc.wh * pc.ww);
+        uint cg = cong[ci], sf = selfq[ci];
+        if (cg > sf) c += pc.wq * (cg - sf);
+    }
+    cost[gid] = c;
+}
