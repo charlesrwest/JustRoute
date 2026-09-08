@@ -1,0 +1,80 @@
+# Build the JustRoute routing core for every (OS, CPython) KiCad might run
+# the IPC plugin with, then assemble ONE universal PCM package that bundles
+# them all (the plugin's ABI-aware loader picks the right binary at runtime).
+#
+# Enable this in the repo (Actions tab). It runs on a version tag (v*) or
+# manually. The final job uploads the universal zip and prints the
+# download_size / install_size / sha256 the metadata needs.
+name: pcm-release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+jobs:
+  wheels:
+    name: core ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-13, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheels (cp310-cp314)
+        uses: pypa/cibuildwheel@v2.21
+        with:
+          package-dir: routing_env
+          config-file: kicad_port/pcm/cibuildwheel.toml
+        env:
+          # manylinux/macos/windows all build the CPU-only core
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  package:
+    name: assemble universal PCM zip
+    needs: wheels
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required for action-gh-release to create the release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          path: all-wheels
+          merge-multiple: true
+      - name: Assemble
+        run: |
+          python3 kicad_port/pcm/assemble_pcm.py \
+            --out dist --wheels-dir all-wheels | tee assemble.log
+      - name: Fill metadata (download url/sha/size) for this tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          python3 kicad_port/pcm/gen_metadata.py \
+            --zip dist/justroute-pcm-*.zip \
+            --tag "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --out dist/metadata.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: justroute-pcm
+          path: |
+            dist/justroute-pcm-*.zip
+            dist/metadata.json
+      - name: Attach to the GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/justroute-pcm-*.zip
+            dist/metadata.json
