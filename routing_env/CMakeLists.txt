@@ -82,7 +82,11 @@ if(OpenMP_CXX_FOUND)
   target_link_libraries(routing_env_core PUBLIC OpenMP::OpenMP_CXX)
   target_compile_definitions(routing_env_core PUBLIC ROUTING_HAVE_OPENMP=1)
 endif()
-target_compile_options(routing_env_core PRIVATE -Wall -Wextra -O2)
+# GCC/Clang warning+opt flags; MSVC (cl) rejects these (D8021) and its
+# Release config already optimizes, so guard them to non-MSVC toolchains.
+if(NOT MSVC)
+  target_compile_options(routing_env_core PRIVATE -Wall -Wextra -O2)
+endif()
 # The static core lib is linked into the shared pybind module, so it must be PIC.
 set_target_properties(routing_env_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
