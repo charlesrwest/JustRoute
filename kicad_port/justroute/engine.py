@@ -18,9 +18,13 @@ so a single huge search cannot blow through it.
 
 from __future__ import annotations
 
+import os
 import time
 
-NEG_MAX_RESIDUE = 10      # negotiation is a finisher, not a bulldozer
+# Negotiation residue cap: how many unrouted nets the PathFinder finisher will
+# take on. Overridable for experiments (JUSTROUTE_NEG_MAX); the keep-condition
+# (converged + copper-clean + strictly better) guards against blowups either way.
+NEG_MAX_RESIDUE = int(os.environ.get("JUSTROUTE_NEG_MAX", "10"))
 NEG_ITERS = 40
 
 

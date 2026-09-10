@@ -217,9 +217,13 @@ def route_file(input_path: Path, output_path: Path, resolution: float | None = N
         from .pour import inject_pour as _inject_pour
         from .pour import _pad_counts, _net_names
         FAILURE_POUR_MIN_PINS = 12
+        # map positions -> stable ids: the engine reorders nets, and net_names
+        # is keyed by load order == id (position-indexing named wrong nets)
         names0 = info.get("net_names", [])
-        failed_names = [names0[i] for i, u in enumerate(stats.unrouted)
-                        if u and i < len(names0) and names0[i]]
+        _nets0 = board.nets()
+        failed_names = [names0[_nets0[i].id]
+                        for i, u in enumerate(stats.unrouted)
+                        if u and _nets0[i].id < len(names0) and names0[_nets0[i].id]]
         counts = _pad_counts(text)
         by_name = {}
         for num, nm in _net_names(text).items():
@@ -309,9 +313,15 @@ def route_file(input_path: Path, output_path: Path, resolution: float | None = N
         except Exception as e:
             log(f"stitching skipped ({type(e).__name__}: {e})")
 
+    # stats.unrouted is indexed by CURRENT net position; the engine reorders
+    # nets (topo/genome/blame), so map through the stable net id — net_names
+    # is keyed by load order == id. Position-indexing named the WRONG nets.
     names = info.get("net_names", [])
-    unrouted_names = [names[i] if i < len(names) and names[i] else f"net#{i}"
-                      for i, u in enumerate(getattr(stats, "unrouted", []) or []) if u]
+    _bnets = board.nets()
+    unrouted_names = [
+        (names[_bnets[i].id] if _bnets[i].id < len(names) and names[_bnets[i].id]
+         else f"net#{_bnets[i].id}")
+        for i, u in enumerate(getattr(stats, "unrouted", []) or []) if u]
     result = {
         "input": str(input_path),
         "output": str(output_path),

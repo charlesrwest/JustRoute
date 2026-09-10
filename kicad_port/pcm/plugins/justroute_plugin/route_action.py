@@ -381,7 +381,11 @@ def main() -> int:
                      f"unconnected_pins={st.total_unconnected_pins}")
         if st.unrouted_count:
             nets_m = model_board.nets()
-            missing = [frame.net_names[i] if frame.net_names and frame.net_names[i]
+            # st.unrouted is by CURRENT position; the engine reorders nets, so
+            # name through the stable id (net_names is keyed by load order)
+            missing = [frame.net_names[nets_m[i].id]
+                       if frame.net_names and nets_m[i].id < len(frame.net_names)
+                       and frame.net_names[nets_m[i].id]
                        else f"net#{nets_m[i].id}"
                        for i, u in enumerate(st.unrouted) if u]
             progress.log("unrouted nets: " + ", ".join(missing[:20])
