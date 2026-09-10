@@ -48,7 +48,8 @@ def _route_file_to(board_path: Path, out_path: Path, budget_s: float,
     restricted engine pass).
     """
     from justroute.cli import (route_file, _load_core, _tuned_protocol,
-                              FINE_PITCH_MM, COARSE_RES, FINE_RES)
+                              FINE_PITCH_MM, COARSE_RES, FINE_RES,
+                              DEFAULT_MAX_FANOUT)
     from justroute.writer import BoardFrame, extract_geometry
     from justroute import project as _project
 
@@ -62,7 +63,8 @@ def _route_file_to(board_path: Path, out_path: Path, budget_s: float,
     skip = not route_poured
     env = rc.RoutingEnv(2, 10, 10, COARSE_RES, 5.0, 1.0, 0.1)
     try:
-        probe = env.load_kicad_pcb_info(text, COARSE_RES, skip_poured=skip)
+        probe = env.load_kicad_pcb_info(text, COARSE_RES, skip_poured=skip,
+                                        max_fanout=DEFAULT_MAX_FANOUT)
     except RuntimeError as e:
         if "all nets already routed" in str(e):
             log("every net is already routed — nothing to do")
@@ -75,7 +77,8 @@ def _route_file_to(board_path: Path, out_path: Path, budget_s: float,
     res = (FINE_RES if probe.get("min_pad_spacing", 99.0) < FINE_PITCH_MM
            else COARSE_RES)
     env = rc.RoutingEnv(2, 10, 10, res, 5.0, 1.0, 0.1)
-    info = env.load_kicad_pcb_info(text, res, skip_poured=skip)
+    info = env.load_kicad_pcb_info(text, res, skip_poured=skip,
+                                   max_fanout=DEFAULT_MAX_FANOUT)
     frame = BoardFrame.from_info(info, res)
     def plural(n, one, many):
         return one if n == 1 else many.format(n=n)
@@ -86,8 +89,14 @@ def _route_file_to(board_path: Path, out_path: Path, budget_s: float,
                    "{n} pour-fed nets left to their zones: ")
             + ", ".join(poured[:8]) + (" …" if len(poured) > 8 else "")
             + '  (set "route_poured_nets": true in justroute.json to route them)')
-    # pre_routed_nets counts the pour-skipped ones too — report them apart
-    pre = int(info.get("pre_routed_nets", 0) or 0) - len(poured)
+    deferred = list(info.get("deferred_fanout_nets", []) or [])
+    if deferred:
+        log(plural(len(deferred), "1 high-fanout net — pour it: ",
+                   "{n} high-fanout nets — pour these (not routed): ")
+            + ", ".join(deferred[:8]) + (" …" if len(deferred) > 8 else "")
+            + '  (set "max_fanout": 0 in justroute.json to route them anyway)')
+    # pre_routed_nets counts the pour-skipped AND deferred ones too — report apart
+    pre = int(info.get("pre_routed_nets", 0) or 0) - len(poured) - len(deferred)
     part = int(info.get("partial_nets", 0) or 0)
     if pre > 0:
         log(plural(pre, "1 net is already fully routed — leaving it",

@@ -46,6 +46,19 @@ def _tuned_protocol(env) -> None:
         # own dynamic (history-cost) congestion, forcing detours that fail.
         # Disabled (weight 0); the setter stays for easy experimentation.
         env.board().set_congestion_weight(0.0)
+        # Optional GLOBAL PAD REPULSION (experiment; off unless env-set): every
+        # net pays a soft penalty for hugging non-target pads, so routes bow
+        # around dense pad fields instead of wedging through them and blocking
+        # later nets. Sweep-tuned sweet spot pad_mult 4-6, falloff radius 4.
+        # Validated through the gates + full engine before any default change.
+        pad_mult = float(os.environ.get("JUSTROUTE_PAD_REPULSION", "0") or 0)
+        falloff = float(os.environ.get("JUSTROUTE_PAD_FALLOFF", "0") or 0)
+        if pad_mult > 0:
+            b = env.board()
+            if falloff > 0:
+                b.set_falloff_radius(falloff)
+            for i in range(len(b.nets())):
+                b.set_avoidance(i, pad_mult, 0.0)
     except ImportError:
         pass
 
@@ -53,6 +66,14 @@ def _tuned_protocol(env) -> None:
 FINE_PITCH_MM = 0.45     # min pad spacing below this needs the fine grid
 COARSE_RES = 0.05
 FINE_RES = 0.025
+# High-fanout defer (OPT-IN, default OFF): optionally skip nets with more than
+# this many pins. This was investigated as a fix for "hard" boards but the
+# premise was flawed — the failing high-fanout nets were power/ground nets that
+# are POURED on real boards (handled by skip_poured); they only looked like
+# routing failures because the test harness strips zones. Deferring gives +0
+# real completion and "pour it" doesn't solve a genuine routing failure. Kept as
+# an explicit knob (--max-fanout N) for anyone who wants it; 0 = route every net.
+DEFAULT_MAX_FANOUT = 0
 
 
 def friendly_load_error(e: Exception) -> str | None:
@@ -95,9 +116,23 @@ def route_file(input_path: Path, output_path: Path, resolution: float | None = N
                effort: str = "fast", project: Path | None = None,
                route_poured: bool = False, smooth: bool = True,
                smooth_dev: float = 1.5, fillet_mm: float = 0.0,
+               max_fanout: int = DEFAULT_MAX_FANOUT,
+               auto_pour: bool = False,
                log=lambda m: None) -> dict:
     rc = _load_core()
     text = input_path.read_text(encoding="utf-8", errors="replace")
+
+    # Auto-pour (opt-in): a from-scratch board's biggest net (GND) is a plane a
+    # human pours, not a track bundle. Generate the zone BEFORE loading — the
+    # loader's zone-glue then skips the net (skip_poured), the writer keeps the
+    # zone, and kicad-cli --refill-zones verifies it truly connects the net.
+    pour_gen = None
+    if auto_pour:
+        from .pour import inject_pour
+        text, pour_gen = inject_pour(text)
+        if pour_gen:
+            log(f"generated a {pour_gen['name']} pour on {pour_gen['layer']} "
+                f"({pour_gen['pads']} pads) — connectivity checked by DRC")
 
     def _already_routed(e: Exception) -> bool:
         return "all nets already routed" in str(e)
@@ -109,7 +144,8 @@ def route_file(input_path: Path, output_path: Path, resolution: float | None = N
         env = rc.RoutingEnv(2, 10, 10, COARSE_RES, 5.0, 1.0, 0.1)
         try:
             probe = env.load_kicad_pcb_info(text, COARSE_RES,
-                                            skip_poured=not route_poured)
+                                            skip_poured=not route_poured,
+                                            max_fanout=max_fanout)
         except RuntimeError as e:
             if _already_routed(e):
                 output_path.write_text(text, encoding="utf-8")
@@ -127,7 +163,8 @@ def route_file(input_path: Path, output_path: Path, resolution: float | None = N
     env = rc.RoutingEnv(2, 10, 10, resolution, 5.0, 1.0, 0.1)
     try:
         info = env.load_kicad_pcb_info(text, resolution,
-                                       skip_poured=not route_poured)
+                                       skip_poured=not route_poured,
+                                       max_fanout=max_fanout)
     except RuntimeError as e:
         if _already_routed(e):
             output_path.write_text(text, encoding="utf-8")
@@ -192,6 +229,8 @@ def route_file(input_path: Path, output_path: Path, resolution: float | None = N
         "nets": info["nets"],
         "pre_routed_nets": info.get("pre_routed_nets", 0),
         "pour_fed_nets": list(info.get("pour_fed_nets", []) or []),
+        "generated_pour": pour_gen,
+        "deferred_fanout_nets": list(info.get("deferred_fanout_nets", []) or []),
         "project_class_nets": applied_classes,
         "unrouted_nets": unrouted_names,
         "unrouted": stats.unrouted_count,
@@ -232,6 +271,16 @@ def main(argv=None) -> int:
     ap.add_argument("--route-poured", action="store_true",
                     help="also route nets owned by a copper pour (default: "
                          "leave them to their zones)")
+    ap.add_argument("--auto-pour", action="store_true",
+                    help="generate a copper pour for the board's biggest net "
+                         "(GND-style planes) when the file has no zones yet — "
+                         "what a designer would draw before routing; "
+                         "connectivity is verified by the DRC check")
+    ap.add_argument("--max-fanout", type=int, default=None, metavar="N",
+                    help=f"defer nets with more than N pins as plane/pour "
+                         f"candidates instead of routing them (default "
+                         f"{DEFAULT_MAX_FANOUT}; 0 routes every net). Such nets "
+                         f"route ~0%% of the time as tracks.")
     ap.add_argument("--no-smooth", action="store_true",
                     help="skip post-route trace smoothing (keep the raw grid "
                          "staircase geometry)")
@@ -251,12 +300,16 @@ def main(argv=None) -> int:
               and os.environ.get("JUSTROUTE_SMOOTH", "1") != "0")
     fillet_mm = (args.fillet if args.fillet is not None
                  else float(cfg.get("fillet_radius_mm", 0.0) or 0.0))
+    max_fanout = (args.max_fanout if args.max_fanout is not None
+                  else int(cfg.get("max_fanout", DEFAULT_MAX_FANOUT)))
     try:
         result = route_file(args.input, out, resolution,
                             certify_result=not args.no_certify,
                             budget_s=budget, effort=effort, project=args.project,
                             route_poured=route_poured, smooth=smooth,
-                            fillet_mm=fillet_mm,
+                            fillet_mm=fillet_mm, max_fanout=max_fanout,
+                            auto_pour=(args.auto_pour
+                                       or bool(cfg.get("auto_pour", False))),
                             log=lambda m: print(f"[JustRoute] {m}", file=sys.stderr))
     except RuntimeError as e:
         friendly = friendly_load_error(e)
@@ -271,18 +324,31 @@ def main(argv=None) -> int:
         return 0 if cert.get("passed", True) else 1
     # human summary (progressive disclosure: --json for the full record)
     routed = result["nets"] - result["unrouted"]
+    # deferred high-fanout nets are held in pre_routed_nets; don't call them "kept"
+    kept = result["pre_routed_nets"] - len(result.get("deferred_fanout_nets", []))
     print(f"routed {routed}/{result['nets']} nets"
-          + (f" ({result['pre_routed_nets']} already routed, kept)"
-             if result["pre_routed_nets"] else "")
+          + (f" ({kept} already routed, kept)" if kept > 0 else "")
           + f" in {result['wall_s']}s -> {result['output']}")
     if result.get("project_class_nets"):
         print(f"netclasses from project file applied to "
               f"{result['project_class_nets']} nets")
+    if result.get("generated_pour"):
+        gp = result["generated_pour"]
+        print(f"generated a {gp['name']} pour on {gp['layer']} "
+              f"({gp['pads']} pads) — see the DRC line for connectivity")
     if result.get("pour_fed_nets"):
-        pf = result["pour_fed_nets"]
-        print("left to their pours: " + ", ".join(pf[:10])
-              + (" ..." if len(pf) > 10 else "")
-              + "  (--route-poured to route them)")
+        pf = [n for n in result["pour_fed_nets"]
+              if not (result.get("generated_pour")
+                      and n == result["generated_pour"]["name"])]
+        if pf:
+            print("left to their pours: " + ", ".join(pf[:10])
+                  + (" ..." if len(pf) > 10 else "")
+                  + "  (--route-poured to route them)")
+    if result.get("deferred_fanout_nets"):
+        df = result["deferred_fanout_nets"]
+        print("high-fanout, pour these (not routed): " + ", ".join(df[:10])
+              + (" ..." if len(df) > 10 else "")
+              + "  (--max-fanout 0 to route them anyway)")
     if result.get("unrouted_nets"):
         miss = result["unrouted_nets"]
         print("unrouted: " + ", ".join(miss[:15])

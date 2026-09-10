@@ -31,7 +31,8 @@ public:
     int load_pcb_rdl(const std::string& json, double resolution = DEFAULT_RESOLUTION_MM,
                      PcbRdlInfo* info = nullptr);
     int load_kicad_pcb(const std::string& contents, double resolution = DEFAULT_RESOLUTION_MM,
-                       KicadPcbInfo* info = nullptr, bool skip_poured = false);
+                       KicadPcbInfo* info = nullptr, bool skip_poured = false,
+                       int max_fanout = 0);
 
     // Route the whole board in its current net order (full pass). Returns the metrics.
     //

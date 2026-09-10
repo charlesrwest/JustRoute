@@ -170,6 +170,9 @@ PYBIND11_MODULE(routing_env, m) {
         .def("set_avoidance", &Board::set_avoidance, py::arg("net_idx"),
              py::arg("pad_mult"), py::arg("trace_mult"))
         .def("clear_avoidance", &Board::clear_avoidance)
+        .def("add_repel_halo", &Board::add_repel_halo, py::arg("owner_nid"),
+             py::arg("cells"), py::arg("weight"))
+        .def("has_halo", &Board::has_halo)
         .def("set_tree_strategy", &Board::set_tree_strategy, py::arg("strategy"))
         .def("tree_strategy", &Board::tree_strategy)
         .def("bake_congestion_rudy", &Board::bake_congestion_rudy)
@@ -271,9 +274,10 @@ PYBIND11_MODULE(routing_env, m) {
              },
              py::arg("contents"), py::arg("resolution") = routing::DEFAULT_RESOLUTION_MM)
         .def("load_kicad_pcb_info",
-             [](RoutingEnv& e, const std::string& t, double r, bool skip_poured) {
+             [](RoutingEnv& e, const std::string& t, double r, bool skip_poured,
+                int max_fanout) {
                  KicadPcbInfo info;
-                 int nets = e.load_kicad_pcb(t, r, &info, skip_poured);
+                 int nets = e.load_kicad_pcb(t, r, &info, skip_poured, max_fanout);
                  return py::dict(
                      "nets"_a = nets,
                      "layer_names"_a = info.layer_names,
@@ -286,6 +290,7 @@ PYBIND11_MODULE(routing_env, m) {
                      "pre_routed_nets"_a = info.pre_routed_nets,
                      "partial_nets"_a = info.partial_nets,
                      "pour_fed_nets"_a = info.pour_fed_nets,
+                     "deferred_fanout_nets"_a = info.deferred_fanout_nets,
                      "min_pad_spacing"_a = info.min_pad_spacing,
                      "rule_clearance"_a = info.rule_clearance,
                      "default_track_width"_a = info.default_track_width,
@@ -299,7 +304,7 @@ PYBIND11_MODULE(routing_env, m) {
                      "rule_via_drill"_a = info.rule_via_drill);
              },
              py::arg("contents"), py::arg("resolution") = routing::DEFAULT_RESOLUTION_MM,
-             py::arg("skip_poured") = false,
+             py::arg("skip_poured") = false, py::arg("max_fanout") = 0,
              "Load a .kicad_pcb like load_kicad_pcb, but also return the file-frame "
              "metadata the writer needs: copper layer names in Board layer order, the "
              "original KiCad net id per Board net index, and the grid origin in mm "

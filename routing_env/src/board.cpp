@@ -101,6 +101,8 @@ void Board::set_avoidance(std::size_t net_idx, double pad_mult, double trace_mul
 
 void Board::clear_avoidance() {
     avoid_.assign(nets_.size(), NetAvoidance{});
+    halo_cost_.clear();
+    halo_sources_.clear();
 }
 
 void Board::add_manual_trace(const Cell& c, int net_id) {
@@ -217,6 +219,36 @@ double Board::self_pad_cost(const Cell& c, int nid) const {
             if (dist >= R) continue;            // contribution is 0 beyond radius
             sum += falloff_cost(dist, pad_sharp_, R);
         }
+    }
+    return sum;
+}
+
+void Board::add_repel_halo(int owner_nid, const std::vector<Cell>& cells,
+                           double weight) {
+    ensure_avoid_baked();                    // add_source_avoidance gates on it
+    if (halo_cost_.empty()) halo_cost_.assign(grid_.size(), 0.0);
+    halo_sharp_ = pad_sharp_ * std::max(1e-6, weight);
+    for (const Cell& c : cells) {
+        if (!valid(c)) continue;
+        halo_sources_.emplace_back(owner_nid, c);
+        add_source_avoidance(c, halo_cost_, halo_sharp_);
+    }
+}
+
+// Sum of halo falloff from net nid's OWN halo seeds to a cell (self-exemption,
+// so the blocked net can still reach the very pad its halo protects). Mirrors
+// self_pad_cost; halo_sources_ is small (only blocked pads), so this is cheap.
+double Board::self_halo_cost(const Cell& c, int nid) const {
+    if (halo_sources_.empty()) return 0.0;
+    double sum = 0.0;
+    const double R = falloff_radius_;
+    for (const auto& hs : halo_sources_) {
+        if (hs.first != nid) continue;
+        const Cell& s = hs.second;
+        if (s.layer != c.layer) continue;
+        double dist = euclid_dist((double)(s.x - c.x), (double)(s.y - c.y));
+        if (dist >= R) continue;
+        sum += falloff_cost(dist, halo_sharp_, R);
     }
     return sum;
 }
@@ -984,6 +1016,15 @@ void Board::rebuild_avoidance() {
         Cell c = grid_.unindex(i);
         add_source_avoidance(c, trace_avoid_cost_, trace_sharp_);
     }
+    // Re-bake the targeted halo overlay so it stays consistent with the current
+    // falloff radius / sharpness (a set_falloff_radius after seeding halos would
+    // otherwise leave halo_cost_ baked at the old radius).
+    if (!halo_sources_.empty()) {
+        if (halo_cost_.empty()) halo_cost_.assign(grid_.size(), 0.0);
+        else std::fill(halo_cost_.begin(), halo_cost_.end(), 0.0);
+        for (const auto& hs : halo_sources_)
+            add_source_avoidance(hs.second, halo_cost_, halo_sharp_);
+    }
 }
 
 int Board::drc_clearance_cells() const {
@@ -1435,6 +1476,14 @@ Board::NetContext Board::make_net_context(int k) {
             double pad_avoid = pad_avoid_cost_[i] - self_pad_cost(c, nid);
             if (pad_avoid < 0.0) pad_avoid = 0.0;
             cost += av.pad_avoid_mult * pad_avoid;
+        }
+        // Targeted repulsion halo (add_repel_halo): ALWAYS on (no per-net mult)
+        // but self-exempt for the owning net, so blocked pads shove every OTHER
+        // net aside while their own net still reaches them. Empty = no overhead.
+        if (!halo_cost_.empty()) {
+            double hv = halo_cost_[i] - self_halo_cost(c, nid);
+            if (hv < 0.0) hv = 0.0;
+            cost += hv;
         }
         if (av.trace_avoid_mult > 0.0) {
             // Self-exemption: subtract the net's OWN baked contribution.

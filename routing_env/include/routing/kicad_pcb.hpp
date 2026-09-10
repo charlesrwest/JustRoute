@@ -24,6 +24,11 @@ struct KicadPcbInfo {
     int pre_routed_nets = 0;
     int partial_nets = 0;   // nets with copper that does NOT connect all pads
     std::vector<std::string> pour_fed_nets; // skipped as pour-fed (skip_poured)
+    // Nets deferred as HIGH-FANOUT (pin count > max_fanout): power/ground/plane
+    // nets a human pours. Routing a 100+-pin net as a track fails and starves/
+    // blocks the routable nets, so they are left for the user to pour (their pads
+    // still load as obstacles). Reported by name; empty when max_fanout <= 0.
+    std::vector<std::string> deferred_fanout_nets;
     // Effective design rules parsed from the file (net classes + setup minima,
     // v4/v5 dialect), mm; 0 = not present (v6+ keeps them in the project file).
     // rule_* are the MODEL values (max across populated classes — the uniform
@@ -76,8 +81,11 @@ struct KicadPcbInfo {
 // skip_poured: nets owning a copper pour are treated as pre-routed even
 // without tracks — the refilled zone is trusted to connect them (the
 // KiCad-plugin default; campaigns/gates load with false).
+// max_fanout: nets with more than this many pins are DEFERRED (left for the
+// user to pour) instead of routed — see KicadPcbInfo::deferred_fanout_nets.
+// 0 (default) disables it and preserves exact prior behavior.
 Board load_kicad_pcb(const std::string& file_contents, double resolution,
                      KicadPcbInfo* info = nullptr, bool reject_collisions = true,
-                     bool skip_poured = false);
+                     bool skip_poured = false, int max_fanout = 0);
 
 } // namespace routing

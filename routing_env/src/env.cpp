@@ -45,9 +45,9 @@ int RoutingEnv::load_pcb_rdl(const std::string& json, double resolution, PcbRdlI
 }
 
 int RoutingEnv::load_kicad_pcb(const std::string& contents, double resolution,
-                               KicadPcbInfo* info, bool skip_poured) {
+                               KicadPcbInfo* info, bool skip_poured, int max_fanout) {
     Board nb = routing::load_kicad_pcb(contents, resolution, info, true,
-                                       skip_poured);
+                                       skip_poured, max_fanout);
     keep_physics(nb, board_);
     board_ = std::move(nb);
     last_ = RouteStats{};

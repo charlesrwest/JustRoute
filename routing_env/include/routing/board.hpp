@@ -357,6 +357,16 @@ public:
     void set_avoidance(std::size_t net_idx, double pad_mult, double trace_mult);
     // Reset all per-net avoidance multipliers to 0 (clean episode). Does not re-route.
     void clear_avoidance();
+    // TARGETED repulsion halo (experiment): seed an OVERLAY avoidance field at
+    // `cells` (e.g. the pads of a blocked net) so ALL nets bow away from those
+    // specific spots and leave the blocked net room. Unlike pad_avoid_cost_
+    // (every pad, uniform, scaled by each net's pad_avoid_mult), only the added
+    // sources contribute and the term is ALWAYS on in enter_cost (no per-net
+    // multiplier). Owner-exempt: net id `owner_nid` never pays for its own halo
+    // so it can still reach its own pad. `weight` scales the kernel sharpness
+    // (pad_sharp_*weight). Accumulates; clear_avoidance() wipes all halos.
+    void add_repel_halo(int owner_nid, const std::vector<Cell>& cells, double weight);
+    bool has_halo() const { return !halo_sources_.empty(); }
     // Add a pad. radius_cells is the pad's PHYSICAL radius (cells) used for clearance so a
     // foreign trace never overlaps the pad's real footprint (0 = point-pad, e.g. synthetic).
     // Registers a circular PadShape of that radius; all clearance rules run on shapes.
@@ -684,6 +694,15 @@ private:
     // net-mode routing, which keeps net-mode arithmetic bit-identical.
     std::vector<double> self_trace_scratch_;
     int active_self_net_ = -1;   // net id the scratch currently describes
+    // Targeted repulsion halo overlay (see add_repel_halo). Empty = unused, so
+    // enter_cost pays nothing when no halos are seeded. halo_sources_ keeps the
+    // (owner_nid, cell) seeds for per-owner self-exemption and for re-baking on
+    // a falloff-radius change. halo_sharp_ is the sharpness the current seeds
+    // were baked with (single weight per episode for the experiment).
+    std::vector<double> halo_cost_;
+    std::vector<std::pair<int, Cell>> halo_sources_;
+    double halo_sharp_ = 8.0;
+    double self_halo_cost(const Cell& c, int nid) const;
     // Shared RUDY demand field (2D, W*H, normalized max 1; empty = not baked) and its
     // global weight in units of base_cost. See bake_congestion_rudy().
     std::vector<double> congest_cost_;

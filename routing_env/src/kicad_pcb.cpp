@@ -351,7 +351,7 @@ void rotate_deg(double& x, double& y, double deg) {
 } // namespace
 
 Board load_kicad_pcb(const std::string& contents, double resolution, KicadPcbInfo* info,
-                     bool reject_collisions, bool skip_poured) {
+                     bool reject_collisions, bool skip_poured, int max_fanout) {
     if (resolution <= 0.0) throw std::runtime_error("KiCad PCB: resolution must be > 0");
 
     auto body = [&]() -> Board {
@@ -780,6 +780,7 @@ Board load_kicad_pcb(const std::string& contents, double resolution, KicadPcbInf
             for (int zn : zone_glue_nets)
                 if (prerouted_nets.insert(zn).second)
                     pour_skipped_keys.push_back(zn);
+        std::vector<int> deferred_fanout_keys;   // nets left for the user to pour
 
         for (const SExpr* mod : bods) {
             // module absolute (at mx my [rot])
@@ -1838,6 +1839,23 @@ Board load_kicad_pcb(const std::string& contents, double resolution, KicadPcbInf
                     continue;
                 }
             }
+            // High-fanout defer: a net with more pins than max_fanout is a
+            // plane/pour a human fills, not a track. Routing it fails and
+            // starves/blocks the routable nets, so leave it for the user (its
+            // pads still load as obstacles). Same obstacle+skip pattern as the
+            // barrel-connected case above.
+            if (max_fanout > 0 && (int)cells.size() > max_fanout) {
+                for (const auto& cv : cells)
+                    obstacles.push_back({min_x + cv.second.cx * resolution,
+                                         min_y + cv.second.cy * resolution,
+                                         cv.first.layer,
+                                         cv.second.hw * resolution,
+                                         cv.second.hh * resolution,
+                                         cv.second.rot, cv.second.oval});
+                deferred_fanout_keys.push_back(nid);
+                prerouted_nets.insert(nid);
+                continue;
+            }
             Net net;
             net.id = bidx;
             for (const auto& cv : cells) net.pins.push_back(cv.first);
@@ -1967,6 +1985,17 @@ Board load_kicad_pcb(const std::string& contents, double resolution, KicadPcbInf
                 else {
                     auto it = decl_code_names.find(oid);
                     info->pour_fed_nets.push_back(
+                        it != decl_code_names.end() ? it->second
+                                                    : "net#" + std::to_string(oid));
+                }
+            }
+            info->deferred_fanout_nets.clear();
+            for (int oid : deferred_fanout_keys) {
+                if (oid < 0 && -oid <= (int)code_names.size())
+                    info->deferred_fanout_nets.push_back(code_names[(size_t)(-oid) - 1]);
+                else {
+                    auto it = decl_code_names.find(oid);
+                    info->deferred_fanout_nets.push_back(
                         it != decl_code_names.end() ? it->second
                                                     : "net#" + std::to_string(oid));
                 }
