@@ -9,8 +9,11 @@ build-verbosity = 1
 # the Vulkan/GPU path is optional at build time; CPU-only wheels are the target
 environment = { ROUTING_ENV_BUILD_PYTHON = "ON" }
 
+# Native 64-bit only: aarch64-under-QEMU took >6h (GitHub's job limit) for
+# the C++ core x 5 CPythons. Linux ARM builds natively on the free
+# ubuntu-24.04-arm runner instead (its own matrix entry in pcm-release.yml).
 [tool.cibuildwheel.linux]
-archs = ["x86_64", "aarch64"]
+archs = ["auto64"]
 
 [tool.cibuildwheel.macos]
 archs = ["arm64", "x86_64"]

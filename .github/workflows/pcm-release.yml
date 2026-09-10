@@ -22,7 +22,9 @@ jobs:
         # macOS Intel (macos-13) dropped for v0.x: GitHub's free-tier Intel
         # runners no longer allocate (jobs queue until the run self-cancels).
         # The core is proven portable there; re-add when a runner path exists.
-        os: [ubuntu-latest, macos-14, windows-latest]
+        # Linux ARM builds NATIVELY on the free ubuntu-24.04-arm runner —
+        # aarch64-under-QEMU on ubuntu-latest blew GitHub's 6h job limit.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
