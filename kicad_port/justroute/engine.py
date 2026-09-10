@@ -192,9 +192,17 @@ def route_best(env, budget_s: float, log=lambda m: None,
                     f"pins={st.total_unconnected_pins}")
                 if st.unrouted_count == 0:
                     break
-        if _score(st) > best and env.has_checkpoint():
+        # Land on the retained best. CRITICAL: compare the LIVE board's score,
+        # not `st` — st tracks the best-so-far stats, so _score(st) == best by
+        # construction and a guard on it NEVER fires. That left the board at
+        # the last (usually worse) genome trial while st claimed the best:
+        # measured on Thanos, route_best returned "4 unrouted" stats for a
+        # board that really had 19 — the writer then wrote the worse board.
+        cur = board.collect_stats(False)
+        if _score(cur) > best and env.has_checkpoint():
             env.restore_checkpoint()
-            st = board.collect_stats(False)
+            cur = board.collect_stats(False)
+        st = cur
         log(f"genome done: {cyc} cycles, unrouted={st.unrouted_count}")
 
     # ---- blame-directed reorder rounds ----
@@ -277,9 +285,14 @@ def route_best(env, budget_s: float, log=lambda m: None,
             env.restore_checkpoint()
             st = board.collect_stats(False)
 
-    # land on the best retained state
-    if _score(st) > best and env.has_checkpoint():
+    # Land on the best retained state — judged from the LIVE board (see the
+    # genome-loop note: st is the best-so-far stats, so guarding on it never
+    # restores). The returned stats are recomputed from the board actually
+    # left behind, so caller-visible numbers always match the written copper.
+    cur = board.collect_stats(False)
+    if _score(cur) > best and env.has_checkpoint():
         env.restore_checkpoint()
-        st = board.collect_stats(False)
+        cur = board.collect_stats(False)
+    st = cur
     board.set_route_time_budget_s(0.0)
     return {"stats": st, "wall_s": round(time.monotonic() - t0, 2)}
