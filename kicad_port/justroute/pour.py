@@ -94,29 +94,39 @@ def zone_sexpr(net_num: int, net_name: str, bbox, layer: str, quoted: bool) -> s
     )
 
 
-def plane_candidate(text: str, min_pins: int = 30):
+def plane_candidate(text: str, min_pins: int = 30, target_name: str | None = None):
     """(net_num, name, pad_count) of the pour target, or None.
 
     Only when the file has NO copper zone (an existing zone = the designer's
-    own plane plan; adding ours would fight it)."""
+    own plane plan; adding ours would fight it). With `target_name` the
+    candidate is that specific net (failure-driven trigger: the router already
+    proved it can't route it as tracks) instead of the largest-fanout one."""
     if _has_copper_zone(text):
         return None
     counts = _pad_counts(text)
     if not counts:
         return None
+    names = _net_names(text)
+    if target_name is not None:
+        matches = [n for n, nm in names.items() if nm == target_name]
+        if not matches or counts.get(matches[0], 0) < min_pins:
+            return None
+        net = matches[0]
+        return (net, target_name, counts[net])
     net, pads = counts.most_common(1)[0]
     if pads < min_pins:
         return None
-    name = _net_names(text).get(net, f"net#{net}")
+    name = names.get(net, f"net#{net}")
     return (net, name, pads)
 
 
-def inject_pour(text: str, min_pins: int = 30, layer: str = "B.Cu"):
+def inject_pour(text: str, min_pins: int = 30, layer: str = "B.Cu",
+                target_name: str | None = None):
     """Inject a generated pour for the plane candidate.
 
     Returns (new_text, {"net", "name", "pads", "layer"}) or (text, None) when
     no candidate (existing zones / no big net / no bbox)."""
-    cand = plane_candidate(text, min_pins)
+    cand = plane_candidate(text, min_pins, target_name)
     if cand is None:
         return text, None
     bbox = _board_bbox(text)
@@ -130,3 +140,58 @@ def inject_pour(text: str, min_pins: int = 30, layer: str = "B.Cu"):
         return text, None
     new_text = body[:j] + zone + ')\n'
     return new_text, {"net": net, "name": name, "pads": pads, "layer": layer}
+
+
+# --------------------------------------------------------------------------
+# Stitching vias: pads the pour can't reach (SMD pads on the far layer) show
+# up in kicad-cli's unconnected_items WITH exact positions — the judge tells
+# us where the gaps are, so no footprint-rotation math is ever needed. A via
+# dropped at the pad position lands on the pad (same net: no clearance rule
+# between a via and its own pad) and its barrel reaches the pour layer.
+# --------------------------------------------------------------------------
+
+def plane_unconnected_positions(drc_report: dict, plane_name: str):
+    """(x, y) mm of pads kicad-cli says are still unconnected on the plane net."""
+    out = []
+    for u in drc_report.get("unconnected_items", []):
+        # the airwire's description names both anchors; net name appears in it
+        desc = " ".join(str(it.get("description", "")) for it in u.get("items", []))
+        if f"[{plane_name}]" not in desc and f" {plane_name} " not in desc \
+                and f'"{plane_name}"' not in desc and plane_name not in desc:
+            continue
+        for it in u.get("items", []):
+            d = str(it.get("description", ""))
+            pos = it.get("pos") or {}
+            if d.startswith("Pad ") and "x" in pos:
+                out.append((float(pos["x"]), float(pos["y"])))
+    # dedup (same pad can anchor several airwires)
+    seen = set()
+    uniq = []
+    for x, y in out:
+        k = (round(x, 3), round(y, 3))
+        if k not in seen:
+            seen.add(k)
+            uniq.append((x, y))
+    return uniq
+
+
+def via_sexpr(x: float, y: float, net_num: int, quoted: bool,
+              size: float = 0.6, drill: float = 0.3) -> str:
+    q = '"' if quoted else ''
+    return (f'  (via (at {x:.4f} {y:.4f}) (size {size}) (drill {drill}) '
+            f'(layers {q}F.Cu{q} {q}B.Cu{q}) (net {net_num}))\n')
+
+
+def add_stitch_vias(text: str, positions, net_num: int,
+                    size: float = 0.6, drill: float = 0.3):
+    """Append a stitch via at each position. Returns new text."""
+    if not positions:
+        return text
+    quoted = _quoted_dialect(text)
+    body = text.rstrip()
+    j = body.rfind(')')
+    if j < 0:
+        return text
+    vias = "".join(via_sexpr(x, y, net_num, quoted, size, drill)
+                   for x, y in positions)
+    return body[:j] + vias + ')\n'

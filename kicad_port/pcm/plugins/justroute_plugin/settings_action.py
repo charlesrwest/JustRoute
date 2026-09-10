@@ -20,6 +20,7 @@ DEFAULTS = {
     "budget_s": 0,            # 0 = auto (1s per net, clamped 60..600)
     "effort": "full",
     "route_poured_nets": False,
+    "auto_pour": False,       # generate a pour for the biggest net (no-zone boards)
     "resolution": 0,          # 0 = auto (0.05mm, 0.025mm for fine pitch)
     "fillet_radius_mm": 0,    # 0 = square corners; >0 = rounded (arc fillets)
 }
@@ -82,26 +83,32 @@ def run_dialog(cfg_path: Path) -> int:
     tk.Checkbutton(frm, variable=poured).grid(
         row=4, column=1, sticky="e", pady=(6, 0))
 
+    autopour = tk.BooleanVar(value=bool(cfg.get("auto_pour", False)))
+    row(6, "Generate missing pour", "boards with no copper zones get a pour "
+                                    "for their biggest net (GND-style planes)")
+    tk.Checkbutton(frm, variable=autopour).grid(
+        row=6, column=1, sticky="e", pady=(6, 0))
+
     res = tk.StringVar(value=str(cfg.get("resolution") or 0))
-    row(6, "Grid resolution (mm)", "0 = automatic: 0.05, or 0.025 for "
+    row(8, "Grid resolution (mm)", "0 = automatic: 0.05, or 0.025 for "
                                    "fine-pitch boards")
     rb = tk.Frame(frm)
-    rb.grid(row=6, column=1, sticky="e", pady=(6, 0))
+    rb.grid(row=8, column=1, sticky="e", pady=(6, 0))
     for v, lbl in (("0", "Auto"), ("0.05", "0.05"), ("0.025", "0.025")):
         tk.Radiobutton(rb, text=lbl, value=v, variable=res).pack(side="left")
 
     fillet = tk.StringVar(value=str(cfg.get("fillet_radius_mm") or 0))
-    row(8, "Corner rounding (mm)", "0 = square corners; a radius rounds "
-                                   "corners with arcs (validated DRC-clean)")
+    row(10, "Corner rounding (mm)", "0 = square corners; a radius rounds "
+                                    "corners with arcs (validated DRC-clean)")
     fb = tk.Frame(frm)
-    fb.grid(row=8, column=1, sticky="e", pady=(6, 0))
+    fb.grid(row=10, column=1, sticky="e", pady=(6, 0))
     for v, lbl in (("0", "Off"), ("0.3", "0.3"), ("0.5", "0.5"), ("1.0", "1.0")):
         tk.Radiobutton(fb, text=lbl, value=v, variable=fillet).pack(side="left")
 
     status = tk.StringVar(value=str(cfg_path))
     tk.Label(frm, textvariable=status, anchor="w", fg="#777",
              font=("TkDefaultFont", 8), wraplength=400, justify="left").grid(
-        row=10, column=0, columnspan=2, sticky="we", pady=(10, 0))
+        row=12, column=0, columnspan=2, sticky="we", pady=(10, 0))
 
     saved = []
 
@@ -118,6 +125,8 @@ def run_dialog(cfg_path: Path) -> int:
             out["effort"] = effort.get()
         if poured.get():
             out["route_poured_nets"] = True
+        if autopour.get():
+            out["auto_pour"] = True
         try:
             r = float(res.get() or 0)
             if r > 0:

@@ -38,7 +38,7 @@ def _route_file_to(board_path: Path, out_path: Path, budget_s: float,
                    only_nets: set | None = None,
                    log=lambda m: print(f"[JustRoute] {m}"),
                    should_stop=lambda: False, route_poured: bool = False,
-                   fillet_mm: float = 0.0):
+                   fillet_mm: float = 0.0, auto_pour: bool = False):
     """Headless route of the saved board file. Returns (frame, board, result).
 
     Uses the sidecar .kicad_pro (always present in a live KiCad session) for
@@ -60,6 +60,20 @@ def _route_file_to(board_path: Path, out_path: Path, budget_s: float,
         log(str(e))
         return None, None, None
     text = board_path.read_text(encoding="utf-8", errors="replace")
+    # Auto-pour (opt-in via justroute.json "auto_pour"): give a from-scratch
+    # board the plane a designer would draw — inject a zone for the biggest
+    # net before loading; zone-glue/skip_poured then leaves it to its pour.
+    # Only fires when the file has no copper zones (never second-guess an
+    # existing plane plan). Verify connectivity with KiCad's DRC after.
+    if auto_pour:
+        try:
+            from justroute.pour import inject_pour
+            text, _gen = inject_pour(text)
+            if _gen:
+                log(f"generated a {_gen['name']} pour on {_gen['layer']} "
+                    f"({_gen['pads']} pads) — check DRC/ratsnest after import")
+        except Exception as e:
+            log(f"auto-pour skipped ({type(e).__name__}: {e})")
     skip = not route_poured
     env = rc.RoutingEnv(2, 10, 10, COARSE_RES, 5.0, 1.0, 0.1)
     try:
@@ -320,6 +334,7 @@ def main() -> int:
     budget = float(os.environ.get("JUSTROUTE_BUDGET", 0) or cfg.get("budget_s", 0) or 0)
     os.environ.setdefault("JUSTROUTE_EFFORT", str(cfg.get("effort", "full")))
     route_poured = bool(cfg.get("route_poured_nets", False))
+    auto_pour = bool(cfg.get("auto_pour", False))
     fillet_mm = float(os.environ.get("JUSTROUTE_FILLET", 0)
                       or cfg.get("fillet_radius_mm", 0) or 0)
     only = _selection_net_names(board)
@@ -352,7 +367,8 @@ def main() -> int:
                                        log=progress.log,
                                        should_stop=progress.should_stop,
                                        route_poured=route_poured,
-                                       fillet_mm=fillet_mm)
+                                       fillet_mm=fillet_mm,
+                                       auto_pour=auto_pour)
         if env is None:
             res["final"] = "every net is already routed — nothing to do"
             return

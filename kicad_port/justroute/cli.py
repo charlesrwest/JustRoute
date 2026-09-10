@@ -160,50 +160,85 @@ def route_file(input_path: Path, output_path: Path, resolution: float | None = N
         resolution = (FINE_RES if probe.get("min_pad_spacing", 99.0) < FINE_PITCH_MM
                       else COARSE_RES)
 
-    env = rc.RoutingEnv(2, 10, 10, resolution, 5.0, 1.0, 0.1)
-    try:
-        info = env.load_kicad_pcb_info(text, resolution,
-                                       skip_poured=not route_poured,
-                                       max_fanout=max_fanout)
-    except RuntimeError as e:
-        if _already_routed(e):
-            output_path.write_text(text, encoding="utf-8")
-            log("board is already fully routed — nothing to do")
-            return {"input": str(input_path), "output": str(output_path),
-                    "nets": 0, "pre_routed_nets": -1,
-                    "project_class_nets": 0, "unrouted_nets": [],
-                    "unrouted": 0, "unconnected_pins": 0,
-                    "drc_violations_model": 0, "vias": 0, "wall_s": 0.0,
-                    "already_complete": True}
-        raise
-    frame = BoardFrame.from_info(info, resolution)
-    # Sidecar project file: KiCad 6+ keeps netclass definitions/assignments
-    # in <project>.kicad_pro, not the pcb — apply them to the physics tiers
-    # and the emitted geometry (explicit --project beats auto-detection).
     from . import project as _project
     pro = project or _project.find_project(input_path)
-    applied_classes = 0
-    if pro is not None and Path(pro).exists():
-        try:
-            applied_classes = _project.apply_project_rules(
-                env, env.board(), frame, info, Path(pro), resolution, log=log)
-        except Exception as e:
-            log(f"project file ignored ({type(e).__name__}: {e})")
-    _tuned_protocol(env)
-    board = env.board()
-    if budget_s > 0.0:
-        board.set_route_time_budget_s(budget_s)
-
     t0 = time.monotonic()
-    if effort == "full":
-        from .engine import route_best
-        # default budget scales with board size (1s/net, clamped 60..600) —
-        # the same rule the KiCad plugin uses
-        auto_budget = max(60.0, min(600.0, float(info["nets"])))
-        r = route_best(env, budget_s if budget_s > 0 else auto_budget, log=log)
-        stats = r["stats"]
-    else:
-        stats = board.route_all()
+    attempt = 0
+    while True:
+        env = rc.RoutingEnv(2, 10, 10, resolution, 5.0, 1.0, 0.1)
+        try:
+            info = env.load_kicad_pcb_info(text, resolution,
+                                           skip_poured=not route_poured,
+                                           max_fanout=max_fanout)
+        except RuntimeError as e:
+            if _already_routed(e):
+                output_path.write_text(text, encoding="utf-8")
+                log("board is already fully routed — nothing to do")
+                return {"input": str(input_path), "output": str(output_path),
+                        "nets": 0, "pre_routed_nets": -1,
+                        "project_class_nets": 0, "unrouted_nets": [],
+                        "unrouted": 0, "unconnected_pins": 0,
+                        "drc_violations_model": 0, "vias": 0, "wall_s": 0.0,
+                        "already_complete": True}
+            raise
+        frame = BoardFrame.from_info(info, resolution)
+        # Sidecar project file: KiCad 6+ keeps netclass definitions/assignments
+        # in <project>.kicad_pro, not the pcb — apply them to the physics tiers
+        # and the emitted geometry (explicit --project beats auto-detection).
+        applied_classes = 0
+        if pro is not None and Path(pro).exists():
+            try:
+                applied_classes = _project.apply_project_rules(
+                    env, env.board(), frame, info, Path(pro), resolution, log=log)
+            except Exception as e:
+                log(f"project file ignored ({type(e).__name__}: {e})")
+        _tuned_protocol(env)
+        board = env.board()
+        if budget_s > 0.0:
+            board.set_route_time_budget_s(budget_s)
+
+        if effort == "full":
+            from .engine import route_best
+            # default budget scales with board size (1s/net, clamped 60..600) —
+            # the same rule the KiCad plugin uses
+            auto_budget = max(60.0, min(600.0, float(info["nets"])))
+            r = route_best(env, budget_s if budget_s > 0 else auto_budget, log=log)
+            stats = r["stats"]
+        else:
+            stats = board.route_all()
+
+        # Failure-driven pour (auto-pour's second trigger): the router just
+        # PROVED a mid-fanout net won't route as tracks — give it the plane a
+        # designer would, and re-route the board around it. Fires at most once,
+        # and inject_pour's no-existing-zone guard makes it a no-op whenever
+        # any zone exists (including one we generated pre-route).
+        if not (auto_pour and attempt == 0 and stats.unrouted_count > 0):
+            break
+        from .pour import inject_pour as _inject_pour
+        from .pour import _pad_counts, _net_names
+        FAILURE_POUR_MIN_PINS = 12
+        names0 = info.get("net_names", [])
+        failed_names = [names0[i] for i, u in enumerate(stats.unrouted)
+                        if u and i < len(names0) and names0[i]]
+        counts = _pad_counts(text)
+        by_name = {}
+        for num, nm in _net_names(text).items():
+            by_name.setdefault(nm, num)
+        cand_name, cand_pads = None, 0
+        for nm in failed_names:
+            num = by_name.get(nm)
+            if num is not None and counts.get(num, 0) > cand_pads:
+                cand_name, cand_pads = nm, counts[num]
+        if cand_name is None or cand_pads < FAILURE_POUR_MIN_PINS:
+            break
+        text2, gen2 = _inject_pour(text, min_pins=FAILURE_POUR_MIN_PINS,
+                                   target_name=cand_name)
+        if gen2 is None:
+            break
+        text, pour_gen = text2, gen2
+        log(f"net '{cand_name}' won't route as tracks ({cand_pads} pads) — "
+            f"generating its pour and re-routing")
+        attempt += 1
     wall = time.monotonic() - t0
 
     # Post-route smoothing: collapse the grid staircase into straight segments
@@ -219,6 +254,60 @@ def route_file(input_path: Path, output_path: Path, resolution: float | None = N
             log(f"smoothing skipped ({type(e).__name__}: {e})")
 
     output_path.write_text(write_routed(text, board, frame), encoding="utf-8")
+
+    # Stitching vias: pads the generated pour can't reach (SMD pads on the far
+    # layer) are reported by kicad-cli with exact positions — drop a same-net
+    # via on each (via-in-pad: no clearance rule against its own pad; the
+    # barrel reaches the pour layer). Kept only if the judge says the board
+    # did not get worse; otherwise reverted whole.
+    if pour_gen is not None and certify_result:
+        from . import certify as _certify
+        from .pour import add_stitch_vias, plane_unconnected_positions
+        try:
+            rep = _certify.run_drc(output_path)
+            spots = plane_unconnected_positions(rep, pour_gen["name"])
+            if spots:
+                routed_text = output_path.read_text(encoding="utf-8")
+                n_viol0 = len(rep.get("violations", []))
+
+                def _viol_positions(report):
+                    out = []
+                    for v in report.get("violations", []):
+                        for it in v.get("items", []):
+                            p = it.get("pos") or {}
+                            if "x" in p:
+                                out.append((float(p["x"]), float(p["y"])))
+                    return out
+
+                # place all candidates, then drop the ones the judge rejects
+                # (a via near a new violation position); at most two passes.
+                keep = list(spots)
+                for _round in (0, 1):
+                    output_path.write_text(
+                        add_stitch_vias(routed_text, keep, pour_gen["net"]),
+                        encoding="utf-8")
+                    rep2 = _certify.run_drc(output_path)
+                    if len(rep2.get("violations", [])) <= n_viol0:
+                        break
+                    bad = _viol_positions(rep2)
+                    keep = [s for s in keep
+                            if not any(abs(s[0] - bx) < 1.0 and abs(s[1] - by) < 1.0
+                                       for bx, by in bad)]
+                    if not keep:
+                        break
+                if not keep or len(rep2.get("violations", [])) > n_viol0:
+                    output_path.write_text(routed_text, encoding="utf-8")
+                    log("stitching reverted (vias would add violations)")
+                else:
+                    pour_gen["stitch_vias"] = len(keep)
+                    dropped = len(spots) - len(keep)
+                    log(f"added {len(keep)} stitching via(s) to reach the "
+                        f"{pour_gen['name']} pour"
+                        + (f" ({dropped} spot(s) skipped)" if dropped else ""))
+        except _certify.KicadCliMissing:
+            pass
+        except Exception as e:
+            log(f"stitching skipped ({type(e).__name__}: {e})")
 
     names = info.get("net_names", [])
     unrouted_names = [names[i] if i < len(names) and names[i] else f"net#{i}"
