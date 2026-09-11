@@ -105,6 +105,20 @@ def route_best(env, budget_s: float, log=lambda m: None,
     log(f"first pass: unrouted={st.unrouted_count} pins={st.total_unconnected_pins} "
         f"({t_pass:.0f}s)")
 
+    # Progress-based stopping: difficulty is not net count — a board deserves
+    # time while it IMPROVES, and none once it stalls. Any kept improvement
+    # resets the clock; when no improvement lands within the stall window the
+    # search phases end (the negotiation finisher still gets its shot). The
+    # window scales with pass time so slow big-board cycles aren't cut mid-try.
+    last_improve = time.monotonic()
+    stall_env = float(os.environ.get("JUSTROUTE_STALL_S", "0") or 0)
+
+    def stall_window() -> float:
+        return stall_env if stall_env > 0 else max(45.0, 3.5 * t_pass)
+
+    def stalled() -> bool:
+        return time.monotonic() - last_improve > stall_window()
+
     # ---- conflict-genome order evolution (the corpus campaign's best method:
     # conflict-directed operators measured ~20x more sample-efficient than
     # blind shuffles; a full-pass eval costs less than one rip-up step) ----
@@ -119,7 +133,7 @@ def route_best(env, budget_s: float, log=lambda m: None,
         elites = [(_score(st), 0, list(ids), list(failed))]
         evo_end = time.monotonic() + max(2.0 * t_pass, remaining() - 2.0 * t_pass)
         cyc = 0
-        while time.monotonic() < evo_end and not should_stop():
+        while time.monotonic() < evo_end and not should_stop() and not stalled():
             pick = elites[rng.randrange(min(len(elites), 5))]
             order = list(pick[2])
             posmap = {nid: i for i, nid in enumerate(order)}
@@ -188,6 +202,7 @@ def route_best(env, budget_s: float, log=lambda m: None,
                 best = sc
                 env.save_checkpoint()
                 st = st2
+                last_improve = time.monotonic()
                 log(f"genome c{cyc}: unrouted={st.unrouted_count} "
                     f"pins={st.total_unconnected_pins}")
                 if st.unrouted_count == 0:
@@ -208,7 +223,7 @@ def route_best(env, budget_s: float, log=lambda m: None,
     # ---- blame-directed reorder rounds ----
     tried: set = set()          # (victim_id, frozenset(blocker_ids)) evictions tried
     pad_cross: set = set()      # nets whose probe crosses a foreign pad: reorder can't fix
-    while remaining() > 5.0 and st.unrouted_count > 0:
+    while remaining() > 5.0 and st.unrouted_count > 0 and not stalled():
         nets = board.nets()
         id2pos = {n.id: i for i, n in enumerate(nets)}
         order = [n.id for n in nets]
@@ -241,6 +256,7 @@ def route_best(env, budget_s: float, log=lambda m: None,
             best = _score(st2)
             env.save_checkpoint()
             st = st2
+            last_improve = time.monotonic()
             log(f"reorder keep: unrouted={st.unrouted_count} "
                 f"pins={st.total_unconnected_pins}")
         else:

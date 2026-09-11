@@ -199,9 +199,12 @@ def route_file(input_path: Path, output_path: Path, resolution: float | None = N
 
         if effort == "full":
             from .engine import route_best
-            # default budget scales with board size (1s/net, clamped 60..600) —
-            # the same rule the KiCad plugin uses
-            auto_budget = max(60.0, min(600.0, float(info["nets"])))
+            # Auto budget = a generous CAP, not a net-count formula: net count
+            # is a poor proxy for difficulty (a 24-net board can be brutal, a
+            # 300-net board trivial). The engine stops on its own when fully
+            # routed or when improvement stalls, so easy boards exit in
+            # seconds and only boards that keep improving use the cap.
+            auto_budget = 600.0
             r = route_best(env, budget_s if budget_s > 0 else auto_budget, log=log)
             stats = r["stats"]
         else:

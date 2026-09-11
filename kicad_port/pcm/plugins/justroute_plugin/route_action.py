@@ -343,7 +343,9 @@ def main() -> int:
             n_nets = len(board.get_nets())
         except Exception:
             n_nets = 100
-        budget = max(60.0, min(600.0, float(n_nets)))
+        # generous CAP, not a net-count formula: the engine exits early when
+        # fully routed or when improvement stalls (difficulty-based stopping)
+        budget = 600.0
     scope = f" — {len(only)} selected nets" if only else ""
     from progress_ui import make_progress
     progress = make_progress(f"JustRoute — {board_path.name}")
