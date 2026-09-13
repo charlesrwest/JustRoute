@@ -114,7 +114,10 @@ def route_best(env, budget_s: float, log=lambda m: None,
     stall_env = float(os.environ.get("JUSTROUTE_STALL_S", "0") or 0)
 
     def stall_window() -> float:
-        return stall_env if stall_env > 0 else max(45.0, 3.5 * t_pass)
+        # generous by design: hard boards find wins in bursts with long dry
+        # spells between — give several full search cycles (genome cycles run
+        # ~1.3x t_pass each) and never less than five minutes before quitting
+        return stall_env if stall_env > 0 else max(300.0, 6.0 * t_pass)
 
     def stalled() -> bool:
         return time.monotonic() - last_improve > stall_window()
