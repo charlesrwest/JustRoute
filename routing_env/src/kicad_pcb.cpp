@@ -909,7 +909,18 @@ Board load_kicad_pcb(const std::string& contents, double resolution, KicadPcbInf
                         catch (...) {}   // skips the 'oval' token
                     }
                     if (!dv.empty() && dv[0] > 0.0) {
-                        const double deficit = std::max(0.0, 0.25 - enforced_clr_mm);
+                        // NPTH holes count as BOARD EDGE for KiCad's
+                        // copper_edge_clearance rule (0.5mm default) — plated
+                        // holes get the 0.25mm hole_clearance rule. Measured:
+                        // tracks hugging a mounting hole at copper clearance
+                        // drew 18 copper_edge_clearance errors on stm32_aprs.
+                        const bool npth = pad->kids.size() > 2
+                                          && !pad->kids[2].is_list
+                                          && pad->kids[2].atom == "np_thru_hole";
+                        const double hole_rule =
+                            npth ? kKiCadEdgeClearanceMM : 0.25;
+                        const double deficit =
+                            std::max(0.0, hole_rule - enforced_clr_mm);
                         // hole center sits at -offset in the shape frame
                         const double hw2 = std::abs(pg.off_x) + dv[0] * 0.5 + deficit;
                         const double hh2 = std::abs(pg.off_y)
