@@ -137,6 +137,7 @@ def route_file(input_path: Path, output_path: Path, resolution: float | None = N
     def _already_routed(e: Exception) -> bool:
         return "all nets already routed" in str(e)
 
+    auto_res = resolution is None   # we chose it -> the fine retry may fire
     if resolution is None:
         # Auto-resolution: fine-pitch parts (0.4mm QFNs) have ZERO clearance
         # slack — any half-cell discretization at 0.05 shows up as real KiCad
@@ -164,6 +165,8 @@ def route_file(input_path: Path, output_path: Path, resolution: float | None = N
     pro = project or _project.find_project(input_path)
     t0 = time.monotonic()
     attempt = 0
+    fine_stash = None        # coarse attempt kept while the fine retry runs
+    fine_tried = False
     while True:
         env = rc.RoutingEnv(2, 10, 10, resolution, 5.0, 1.0, 0.1)
         try:
@@ -209,6 +212,52 @@ def route_file(input_path: Path, output_path: Path, resolution: float | None = N
             stats = r["stats"]
         else:
             stats = board.route_all()
+
+        # Guarded FINE-GRID retry: on dense boards the coarse model clearance
+        # (declared + the 0.7-cell snap margin) can pinch every escape shut —
+        # the failed nets then probe with NO blockers (nothing is in the way;
+        # the discretization itself is the wall). Measured recoveries at
+        # 0.025: 3/52 -> 34/52, 2/30 -> 18/30. Retry the whole board fine and
+        # keep whichever result routed more (never worse by construction).
+        if fine_stash is None and not fine_tried and auto_res \
+                and resolution == COARSE_RES and stats.unrouted_count > 0:
+            zb = False
+            checked = 0
+            for i, u in enumerate(stats.unrouted):
+                if not u:
+                    continue
+                if checked >= 8:
+                    break
+                checked += 1
+                try:
+                    blockers, crossed = board.probe_blockers(i)
+                except Exception:
+                    continue
+                if not blockers and not crossed:
+                    zb = True
+                    break
+            if zb:
+                fine_stash = (env, board, info, frame, stats, resolution,
+                              applied_classes)
+                resolution = FINE_RES
+                fine_tried = True
+                log("failed nets have nothing blocking them — the coarse grid "
+                    "is pinching; retrying the board on the fine grid")
+                continue
+        if fine_stash is not None:
+            c_env, c_board, c_info, c_frame, c_st, c_res, c_ac = fine_stash
+            routed_c = c_info["nets"] - c_st.unrouted_count
+            routed_f = info["nets"] - stats.unrouted_count
+            if (routed_f > routed_c
+                    or (routed_f == routed_c
+                        and stats.total_unconnected_pins
+                        < c_st.total_unconnected_pins)):
+                log(f"fine-grid retry kept: routed {routed_c} -> {routed_f}")
+            else:
+                env, board, info, frame, stats, resolution, applied_classes = \
+                    fine_stash
+                log("fine-grid retry did not improve — keeping the coarse result")
+            fine_stash = None
 
         # Failure-driven pour (auto-pour's second trigger): the router just
         # PROVED a mid-fanout net won't route as tracks — give it the plane a

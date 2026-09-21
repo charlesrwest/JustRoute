@@ -304,6 +304,52 @@ def route_best(env, budget_s: float, log=lambda m: None,
             env.restore_checkpoint()
             st = board.collect_stats(False)
 
+    # ---- windowed solo retries ----
+    # A failed net whose blame probe finds NOTHING to blame (no blocking net,
+    # no pad crossing) was simply missed by the full passes — measured to
+    # sometimes route alone inside a tight window via the negotiation oracle
+    # even after genome/reorder gave up. Cheap (small window, one net),
+    # checkpoint-guarded, so strictly non-harmful.
+    if st.unrouted_count and remaining() > 5.0:
+        g = board.grid()
+        W, H = g.width(), g.height()
+        solo_wins = 0
+        for i in [k for k, u in enumerate(st.unrouted) if u]:
+            if remaining() < 5.0 or should_stop():
+                break
+            try:
+                blockers, crossed = board.probe_blockers(i)
+            except Exception:
+                continue
+            if crossed or blockers:
+                continue
+            pins = board.nets()[i].pins
+            if not pins:
+                continue
+            xs = [p.x for p in pins]; ys = [p.y for p in pins]
+            m = 40
+            x0 = max(0, min(xs) - m); y0 = max(0, min(ys) - m)
+            x1 = min(W - 1, max(xs) + m); y1 = min(H - 1, max(ys) + m)
+            env.save_checkpoint()
+            u_before = st.unrouted_count
+            try:
+                conv, _i2, _sh, _r = board.negotiate_window(
+                    [i], x0, y0, x1, y1, 24, 0.5, 1.6, 0.4)
+                st2 = board.collect_stats(True)
+                clean = (st2.drc_violations - st2.unrouted_count) == 0
+                if conv and clean and st2.unrouted_count < u_before:
+                    best = _score(st2)
+                    env.save_checkpoint()
+                    st = st2
+                    solo_wins += 1
+                    continue
+            except Exception:
+                pass
+            env.restore_checkpoint()
+            st = board.collect_stats(False)
+        if solo_wins:
+            log(f"solo retries: recovered {solo_wins} net(s)")
+
     # Land on the best retained state — judged from the LIVE board (see the
     # genome-loop note: st is the best-so-far stats, so guarding on it never
     # restores). The returned stats are recomputed from the board actually
