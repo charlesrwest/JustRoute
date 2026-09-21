@@ -168,50 +168,65 @@ def route_file(input_path: Path, output_path: Path, resolution: float | None = N
     fine_stash = None        # coarse attempt kept while the fine retry runs
     fine_tried = False
     while True:
-        env = rc.RoutingEnv(2, 10, 10, resolution, 5.0, 1.0, 0.1)
         try:
-            info = env.load_kicad_pcb_info(text, resolution,
-                                           skip_poured=not route_poured,
-                                           max_fanout=max_fanout)
-        except RuntimeError as e:
-            if _already_routed(e):
-                output_path.write_text(text, encoding="utf-8")
-                log("board is already fully routed — nothing to do")
-                return {"input": str(input_path), "output": str(output_path),
-                        "nets": 0, "pre_routed_nets": -1,
-                        "project_class_nets": 0, "unrouted_nets": [],
-                        "unrouted": 0, "unconnected_pins": 0,
-                        "drc_violations_model": 0, "vias": 0, "wall_s": 0.0,
-                        "already_complete": True}
-            raise
-        frame = BoardFrame.from_info(info, resolution)
-        # Sidecar project file: KiCad 6+ keeps netclass definitions/assignments
-        # in <project>.kicad_pro, not the pcb — apply them to the physics tiers
-        # and the emitted geometry (explicit --project beats auto-detection).
-        applied_classes = 0
-        if pro is not None and Path(pro).exists():
+            env = rc.RoutingEnv(2, 10, 10, resolution, 5.0, 1.0, 0.1)
             try:
-                applied_classes = _project.apply_project_rules(
-                    env, env.board(), frame, info, Path(pro), resolution, log=log)
-            except Exception as e:
-                log(f"project file ignored ({type(e).__name__}: {e})")
-        _tuned_protocol(env)
-        board = env.board()
-        if budget_s > 0.0:
-            board.set_route_time_budget_s(budget_s)
+                info = env.load_kicad_pcb_info(text, resolution,
+                                               skip_poured=not route_poured,
+                                               max_fanout=max_fanout)
+            except RuntimeError as e:
+                if _already_routed(e):
+                    output_path.write_text(text, encoding="utf-8")
+                    log("board is already fully routed — nothing to do")
+                    return {"input": str(input_path), "output": str(output_path),
+                            "nets": 0, "pre_routed_nets": -1,
+                            "project_class_nets": 0, "unrouted_nets": [],
+                            "unrouted": 0, "unconnected_pins": 0,
+                            "drc_violations_model": 0, "vias": 0, "wall_s": 0.0,
+                            "already_complete": True}
+                raise
+            frame = BoardFrame.from_info(info, resolution)
+            # Sidecar project file: KiCad 6+ keeps netclass definitions in
+            # <project>.kicad_pro, not the pcb — apply them to the physics
+            # tiers and emitted geometry (explicit --project beats detection).
+            applied_classes = 0
+            if pro is not None and Path(pro).exists():
+                try:
+                    applied_classes = _project.apply_project_rules(
+                        env, env.board(), frame, info, Path(pro), resolution,
+                        log=log)
+                except Exception as e:
+                    log(f"project file ignored ({type(e).__name__}: {e})")
+            _tuned_protocol(env)
+            board = env.board()
+            if budget_s > 0.0:
+                board.set_route_time_budget_s(budget_s)
 
-        if effort == "full":
-            from .engine import route_best
-            # Auto budget = a generous CAP, not a net-count formula: net count
-            # is a poor proxy for difficulty (a 24-net board can be brutal, a
-            # 300-net board trivial). The engine stops on its own when fully
-            # routed or when improvement stalls, so easy boards exit in
-            # seconds and only boards that keep improving use the cap.
-            auto_budget = 600.0
-            r = route_best(env, budget_s if budget_s > 0 else auto_budget, log=log)
-            stats = r["stats"]
-        else:
-            stats = board.route_all()
+            if effort == "full":
+                from .engine import route_best
+                # Auto budget = a generous CAP, not a net-count formula: net
+                # count is a poor proxy for difficulty. The engine stops on
+                # its own when fully routed or when improvement stalls, so
+                # easy boards exit in seconds and only boards that keep
+                # improving use the cap.
+                auto_budget = 600.0
+                r = route_best(env, budget_s if budget_s > 0 else auto_budget,
+                               log=log)
+                stats = r["stats"]
+            else:
+                stats = board.route_all()
+        except Exception as e:
+            # A retry attempt must never cost the board its earlier result:
+            # the fine grid is 4x the cells and can blow a worker memory cap
+            # (bad_alloc) AFTER the coarse pass already produced a partial.
+            # Fall back to the stashed attempt instead of propagating.
+            if fine_stash is None:
+                raise
+            env, board, info, frame, stats, resolution, applied_classes = \
+                fine_stash
+            fine_stash = None
+            log(f"fine-grid retry failed ({type(e).__name__}) — keeping the "
+                f"coarse result")
 
         # Guarded FINE-GRID retry: on dense boards the coarse model clearance
         # (declared + the 0.7-cell snap margin) can pinch every escape shut —
@@ -237,13 +252,22 @@ def route_file(input_path: Path, output_path: Path, resolution: float | None = N
                     zb = True
                     break
             if zb:
-                fine_stash = (env, board, info, frame, stats, resolution,
-                              applied_classes)
-                resolution = FINE_RES
-                fine_tried = True
-                log("failed nets have nothing blocking them — the coarse grid "
-                    "is pinching; retrying the board on the fine grid")
-                continue
+                g0 = board.grid()
+                fine_cells = g0.width() * g0.height() * 4 * 2
+                if fine_cells > 60_000_000:
+                    # a 4x grid on a board this big risks the memory cap and
+                    # burns the budget for little chance — skip the retry
+                    fine_tried = True
+                    log("coarse grid pinches but the board is too large for "
+                        "a fine-grid retry — keeping the coarse result")
+                else:
+                    fine_stash = (env, board, info, frame, stats, resolution,
+                                  applied_classes)
+                    resolution = FINE_RES
+                    fine_tried = True
+                    log("failed nets have nothing blocking them — the coarse "
+                        "grid is pinching; retrying the board on the fine grid")
+                    continue
         if fine_stash is not None:
             c_env, c_board, c_info, c_frame, c_st, c_res, c_ac = fine_stash
             routed_c = c_info["nets"] - c_st.unrouted_count
