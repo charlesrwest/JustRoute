@@ -92,7 +92,17 @@ private:
             a.is_quoted = true;
             pos_++;
             std::string v;
-            while (pos_ < s_.size() && s_[pos_] != '"') { v.push_back(s_[pos_]); pos_++; }
+            // KiCad escapes quotes/backslashes inside strings ('1/8\" JACK');
+            // a backslash never terminates the string and keeps the next char
+            // verbatim (unescaped here so the atom holds the real text).
+            while (pos_ < s_.size() && s_[pos_] != '"') {
+                if (s_[pos_] == '\\' && pos_ + 1 < s_.size()) {
+                    const char e = s_[pos_ + 1];
+                    if (e == '"' || e == '\\') { v.push_back(e); pos_ += 2; continue; }
+                }
+                v.push_back(s_[pos_]);
+                pos_++;
+            }
             if (pos_ >= s_.size())
                 throw std::runtime_error("KiCad PCB: unterminated quoted string");
             pos_++; // closing quote
