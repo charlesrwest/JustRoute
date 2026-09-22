@@ -310,7 +310,8 @@ def route_best(env, budget_s: float, log=lambda m: None,
     # sometimes route alone inside a tight window via the negotiation oracle
     # even after genome/reorder gave up. Cheap (small window, one net),
     # checkpoint-guarded, so strictly non-harmful.
-    if st.unrouted_count and remaining() > 5.0:
+    if st.unrouted_count and remaining() > 5.0 \
+            and os.environ.get("JUSTROUTE_SOLO", "1") != "0":
         g = board.grid()
         W, H = g.width(), g.height()
         solo_wins = 0
